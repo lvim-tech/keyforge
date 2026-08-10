@@ -38,6 +38,39 @@ type Sheet struct {
 	ValuesFrom string `json:"values_from,omitempty"`
 }
 
+// Lock is the idle screen lock.
+//
+// NOTHING SECRET IS STORED HERE, and that is the point of the design rather than an accident of it.
+// keyforge holds no password of its own to check against: the lock is opened by proving you can use
+// the GPG key that `pass` encrypts to, which gpg asks for through pinentry and keyforge never sees.
+// So there is no hash in this file, no salt, no parameters to age badly, and no second secret to
+// remember that would protect less than the one you already have.
+//
+// ClearAgent is what turns the lock from a curtain into a lock. Without it, gpg signs straight from
+// the agent's cache and the unlock prompt never appears — the lock would open on an empty keypress
+// for exactly as long as the cache lasts, which is exactly the window it exists to cover. With it,
+// locking forgets the passphrase, so unlocking must ask. The cost is real and is why it is a
+// setting: the agent is shared, so this also makes your other terminals and your signed commits ask
+// again.
+type Lock struct {
+	// IdleMinutes is how long keyforge may sit untouched before it locks. 0 disables the lock.
+	IdleMinutes int `json:"idle_minutes"`
+	// ClearAgent drops the gpg-agent passphrase cache when locking.
+	ClearAgent bool `json:"clear_agent"`
+}
+
+// Agent is keyforge's view of how long the REAL master password stays active.
+//
+// The passphrase on the store's GPG key is what actually holds everything in `pass` shut, and how
+// long it stays entered is decided by gpg-agent, not by keyforge. These two values are written into
+// ~/.gnupg/gpg-agent.conf rather than kept here, because a setting that keyforge remembered but
+// gpg-agent did not read would describe a protection that is not in force. Zero means "leave
+// gpg-agent's own configuration alone".
+type Agent struct {
+	DefaultCacheTTL int `json:"default_cache_ttl"` // seconds; gpg's own default is 600
+	MaxCacheTTL     int `json:"max_cache_ttl"`     // seconds; gpg's own default is 7200
+}
+
 // Config is everything keyforge remembers.
 type Config struct {
 	PasswordLength int      `json:"password_length"`
@@ -46,6 +79,8 @@ type Config struct {
 	KDFRounds      int      `json:"kdf_rounds"` // bcrypt-KDF rounds for new SSH keys
 	CertPaths      []string `json:"cert_paths,omitempty"`
 	Sheet          Sheet    `json:"sheet"`
+	Lock           Lock     `json:"lock"`
+	Agent          Agent    `json:"agent"`
 }
 
 // Build-time defaults. Set with -ldflags so a personal build already knows the sheet STRUCTURE
@@ -74,6 +109,9 @@ func Default() Config {
 		Separator:      "-",
 		KDFRounds:      100,
 	}
+	// The lock is off until asked for. A tool that starts demanding a passphrase on its own, on a
+	// machine where nothing has been decided yet, teaches people to turn it off rather than to use it.
+	c.Lock = Lock{IdleMinutes: 0, ClearAgent: true}
 	c.Sheet.Strip = buildStrip
 	if n, err := strconv.Atoi(strings.TrimSpace(buildStripCount)); err == nil && n >= 0 {
 		c.Sheet.StripCount = n

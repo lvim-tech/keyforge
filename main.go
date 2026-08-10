@@ -18,10 +18,13 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/lvim-tech/keyforge/internal/audit"
+	"github.com/lvim-tech/keyforge/internal/config"
+	"github.com/lvim-tech/keyforge/internal/gpgkeys"
 	"github.com/lvim-tech/keyforge/internal/passgen"
 	"github.com/lvim-tech/keyforge/internal/sys"
 	"github.com/lvim-tech/keyforge/internal/ui"
@@ -58,7 +61,25 @@ func main() {
 	case *doGen:
 		os.Exit(runGen(*words, *chars))
 	default:
-		p := tea.NewProgram(ui.New(), tea.WithAltScreen())
+		// A broken config is reported and then stepped over: the interface still works with the
+		// defaults, and refusing to start over a stray comma would be a poor trade.
+		cfg, err := config.Load()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "keyforge: config:", err)
+		}
+		// Bring gpg-agent's cache lifetimes in line with the config, but only when they differ.
+		// Applying them unconditionally would reload the agent on every launch, and a reload drops
+		// every cached passphrase — keyforge would be logging you out of your own store each time
+		// it started, which is the opposite of a setting about how long you stay logged in.
+		if changed, err := gpgkeys.EnsureCacheTTL(
+			time.Duration(cfg.Agent.DefaultCacheTTL)*time.Second,
+			time.Duration(cfg.Agent.MaxCacheTTL)*time.Second,
+		); err != nil {
+			fmt.Fprintln(os.Stderr, "keyforge: gpg-agent:", err)
+		} else if changed {
+			fmt.Fprintln(os.Stderr, "keyforge: gpg-agent cache lifetimes updated; the agent was reloaded")
+		}
+		p := tea.NewProgram(ui.New(cfg), tea.WithAltScreen())
 		if _, err := p.Run(); err != nil {
 			fmt.Fprintln(os.Stderr, "keyforge:", err)
 			os.Exit(1)

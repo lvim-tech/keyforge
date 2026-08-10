@@ -4,8 +4,11 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/lvim-tech/keyforge/internal/config"
 )
 
 // view is one tab. Each owns its state and its own key handling; the shell below only routes.
@@ -58,11 +61,13 @@ type Model struct {
 	status string
 	stErr  bool
 	quit   bool
+	lock   lockState
 }
 
 // New builds the application with every tab this machine can support.
-func New() Model {
+func New(c config.Config) Model {
 	return Model{
+		lock: newLockState(c),
 		views: []view{
 			newKeysView(),
 			newGenView(),
@@ -82,10 +87,53 @@ func (m Model) Init() tea.Cmd {
 			cmds = append(cmds, c)
 		}
 	}
+	if m.lock.enabled() {
+		cmds = append(cmds, lockTick())
+	}
 	return tea.Batch(cmds...)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// The lock is handled before anything else: while it is closed, nothing behind it may see a key
+	// press, and no tab may act on one. Routing it later would mean every view growing its own
+	// "unless locked" clause, and one of them eventually forgetting.
+	switch msg := msg.(type) {
+	case lockTickMsg:
+		if m.lock.idleExpired(time.Time(msg)) {
+			m.lock.lock(fmt.Sprintf("no key pressed for %s", short(m.lock.idle)))
+			m.status = ""
+		}
+		return m, lockTick()
+
+	case unlockDoneMsg:
+		m.lock.unlocking = false
+		if msg.err != nil {
+			m.lock.err = "not unlocked: " + msg.err.Error()
+			return m, nil
+		}
+		m.lock.unlocked()
+		// The world may have moved on while the screen was covered.
+		return m, func() tea.Msg { return reloadMsg{} }
+	}
+
+	if m.lock.locked {
+		key, ok := msg.(tea.KeyMsg)
+		if !ok {
+			return m, nil
+		}
+		switch key.String() {
+		case "enter":
+			if m.lock.unlocking {
+				return m, nil
+			}
+			return m, m.lock.unlockCmd()
+		case "q", "ctrl+c":
+			m.quit = true
+			return m, tea.Quit
+		}
+		return m, nil
+	}
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
@@ -116,10 +164,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, func() tea.Msg { return reloadMsg{} }
 
 	case tea.KeyMsg:
+		m.lock.touch()
 		switch msg.String() {
 		case "ctrl+c":
 			m.quit = true
 			return m, tea.Quit
+		case "ctrl+l":
+			// Locking by hand is the case that actually gets used: you are leaving the desk now, not
+			// in however many minutes the idle timer says.
+			if !m.lock.available() {
+				return m, failure("no GPG key to unlock against — the lock needs one")
+			}
+			m.lock.lock("locked by hand")
+			m.status = ""
+			return m, lockTick()
 		case "tab", "l", "right":
 			if !m.viewCaptures() {
 				m.active = (m.active + 1) % len(m.views)
@@ -182,6 +240,10 @@ func (m Model) View() string {
 	if m.w == 0 {
 		return "…"
 	}
+	if m.lock.locked {
+		return stTitle.Render("keyforge") + "\n" +
+			m.lock.render(m.w, m.h-3) + "\n" + stFooter.Render(m.lock.footer())
+	}
 
 	var tabs []string
 	for i, v := range m.views {
@@ -209,10 +271,14 @@ func (m Model) View() string {
 		}
 	}
 
-	foot := stFooter.Render(joinHints(
-		hint("tab", "next tab"),
-		hint("q", "quit"),
-	) + "   " + m.views[m.active].Footer())
+	shell := []string{hint("tab", "next tab"), hint("q", "quit")}
+	if m.lock.available() {
+		shell = append(shell, hint("ctrl+l", "lock"))
+	}
+	foot := stFooter.Render(joinHints(shell...) + "   " + m.views[m.active].Footer())
+	if s := m.lock.status(); s != "" {
+		foot += stFooter.Render("   " + s)
+	}
 
 	return head + "\n\n" + body + "\n" + st + "\n" + foot
 }
