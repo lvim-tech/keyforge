@@ -45,7 +45,9 @@ type printView struct {
 	lastFile string
 	lastHTML string
 
-	reveal bool // show the real values on screen
+	// rev shows the real values instead of the printed ones. Shared with every other tab that holds
+	// a secret, so the toggle, the timer and the wording are the same wherever a value can appear.
+	rev reveal
 
 	// entry form
 	fLabel, fNote input
@@ -119,6 +121,11 @@ func (v *printView) capturesInput() bool { return v.mode != pmList }
 func (v *printView) Init() tea.Cmd { return nil }
 
 func (v *printView) Update(msg tea.Msg) (view, tea.Cmd) {
+	// The hide timer is broadcast rather than typed, so it is taken before the cast below discards
+	// everything that is not a key press.
+	if v.rev.expired(msg) {
+		return v, nil
+	}
 	key, ok := msg.(tea.KeyMsg)
 	if !ok {
 		return v, nil
@@ -172,7 +179,7 @@ func (v *printView) updateList(key tea.KeyMsg) (view, tea.Cmd) {
 	case "m":
 		v.mode, v.mField = pmMask, 0
 	case "v":
-		v.reveal = !v.reveal
+		return v, v.rev.toggle()
 	case "x":
 		return v.export()
 	case "s":
@@ -540,13 +547,13 @@ func (v *printView) renderList(w, h int) string {
 			mark = stKey.Render(pointer) + " "
 			st = stRowSel
 		}
-		box := stDim.Render("☐")
+		box := stDim.Render("")
 		if r.include {
-			box = stGood.Render("☑")
+			box = stGood.Render("")
 		}
-		real := r.real
-		if !v.reveal {
-			real = strings.Repeat("•", len([]rune(r.real)))
+		real := mask(r.real)
+		if v.rev.on {
+			real = r.real
 		}
 		bg := st.GetBackground()
 		b.WriteString(mark + box + " " +
@@ -629,7 +636,7 @@ func (v *printView) Footer() string {
 	}
 	f := []string{
 		hint("n", "new"), hint("space", "tick"), hint("g", "regen"),
-		hint("m", "rule"), hint("v", "reveal"), hint("x", "export"), hint("d", "remove"),
+		hint("m", "rule"), revealHint(v.rev.on), hint("x", "export"), hint("d", "remove"),
 	}
 	if !v.cfgSaved {
 		f = append(f, hint("w", "save structure"))

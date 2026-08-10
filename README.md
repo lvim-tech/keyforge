@@ -47,8 +47,8 @@ strings. All from `crypto/rand`. It shows the entropy and how long cracking woul
 assumption stated** — a number without its assumption is advertising, not an estimate. It writes
 straight into `pass`.
 
-A word phrase is the better choice for a key passphrase: it is long, it is memorable, and a wrong
-keyboard layout shows at once — unlike a string hidden behind asterisks.
+A word phrase is the better choice for a key passphrase: it is long, it is memorable, and once it is
+on screen a wrong keyboard layout is obvious at a glance — unlike a string behind asterisks.
 
 **Passwords** — the `pass` store as a tree, and the operations a store actually needs: add an
 existing password, generate one straight into a folder, copy, change, move, delete, filter.
@@ -56,8 +56,9 @@ existing password, generate one straight into a folder, copy, change, move, dele
 The password is typed into a masked field backed by locked memory (see *Process hardening* below)
 and reaches `pass` through a pipe keyforge opens itself — never as an argument, never as a Go string
 that cannot be erased afterwards. Copying goes the other way: `pass show --clip` decrypts and hands
-the value straight to the clipboard helper, which clears it again after 45 seconds. keyforge never
-sees it, and that is why there is no "reveal" beside it.
+the value straight to the clipboard helper, which clears it again after 45 seconds — that path never
+brings the password through keyforge at all. `[v]` does, when what you need is to read it rather
+than paste it.
 
 The entry is written in the layout the rest of the pass ecosystem reads — the password on the first
 line, `login:` and `url:` below it:
@@ -98,6 +99,25 @@ printed and then disappearing.
 The file is written into `/dev/shm`, that is, into **memory**: the plaintext secrets never touch
 persistent storage, nothing goes into a journal, and there is no block to recover after deletion.
 `[S]` wipes it, and a reboot wipes it without you having to remember.
+
+## Secrets on screen
+
+One rule, in every tab that holds a value: **masked until asked, visible for 30 seconds, masked
+again.** `[v]` is the only thing that turns it on — nothing reveals itself.
+
+That includes the generator, which used to print its phrase in the clear and leave it there for as
+long as the tab was open. A freshly generated password is not less of a password for being new, and
+a screen is the easiest place to take one from and the hardest place to notice it being taken. It is
+also the reason the reveal expires rather than waiting to be switched off: the case worth defending
+against is not the person at the keyboard, it is the person who walks past after they have gone.
+
+Generating a new value hides the old one, and in the password list moving to another entry or leaving
+the details puts it away — every exit from a reveal is an exit, not just the timer.
+
+Where the value lives while it is shown depends on where it came from. In the password list `pass
+show` writes into a pipe keyforge opens itself and the bytes are read into locked memory, so the
+decrypted password never becomes a Go string except for the instant it is drawn. That instant is
+unavoidable: a terminal takes strings.
 
 ## The rule for the sheet
 
@@ -148,7 +168,7 @@ that knows the value without asking you **contains** the value.
 | `RLIMIT_CORE = 0` | a crash leaves no dump — on this machine it would land in `/var/lib/systemd/coredump` as a readable file |
 | `PR_SET_DUMPABLE 0` | another process cannot attach a debugger and read the memory |
 | `mmap` + `mlock` + `MADV_DONTDUMP` | the remembered piece lives outside the Go heap, never goes to swap, is excluded from dumps |
-| masked field | the value never appears on screen |
+| masked field | the value appears only when asked, and not for long |
 
 It is not a Go string, and that is the substance of it: a string is immutable, so it cannot be
 zeroed, and the garbage collector may have moved it and left copies nobody can reach. An anonymous

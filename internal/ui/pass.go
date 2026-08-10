@@ -9,6 +9,7 @@ import (
 
 	"github.com/lvim-tech/keyforge/internal/gpgkeys"
 	"github.com/lvim-tech/keyforge/internal/passstore"
+	"github.com/lvim-tech/keyforge/internal/sys"
 )
 
 type storeMode int
@@ -46,13 +47,27 @@ type passView struct {
 	detailEntry  passstore.Entry
 	detailFields map[string]string
 	detailErr    string
+
+	// A revealed password lives here and only here: in locked memory, for one entry, until the
+	// shared timer fires or the pane is left. Never turned on by itself.
+	rev      reveal
+	revealed *sys.Secret
 }
 
 func newPassView() *passView {
-	return &passView{
+	v := &passView{
 		move:   newInput("new path", "websites/example.com/user"),
 		filter: newInput("filter", "part of the path"),
 	}
+	// The shared reveal owns the timer and the toggle; wiping the locked buffer is this view's
+	// part of it, because it is the only one holding one.
+	v.rev.onHide = func() {
+		if v.revealed != nil {
+			v.revealed.Close()
+			v.revealed = nil
+		}
+	}
+	return v
 }
 
 func (v *passView) Title() string { return "Passwords" }
@@ -109,6 +124,10 @@ func (v *passView) applyFilter() {
 }
 
 func (v *passView) Update(msg tea.Msg) (view, tea.Cmd) {
+	// The hide timer arrives by broadcast rather than as a key press, so it is taken first.
+	if v.rev.expired(msg) {
+		return v, nil
+	}
 	switch msg := msg.(type) {
 	case reloadMsg:
 		return v, loadPass
@@ -136,7 +155,12 @@ func (v *passView) Update(msg tea.Msg) (view, tea.Cmd) {
 			return v.updateConfirm(msg)
 		case smDetail:
 			switch msg.String() {
+			case "v":
+				return v.toggleReveal()
 			case "esc", "enter", "q":
+				// Leaving the pane is one of the ways a password gets left on screen; it is also
+				// the one the user is least likely to think about.
+				v.rev.hide()
 				v.mode = smList
 			}
 			return v, nil
@@ -151,15 +175,22 @@ func (v *passView) updateList(msg tea.KeyMsg) (view, tea.Cmd) {
 	case "j", "down":
 		if v.sel < len(v.shown)-1 {
 			v.sel++
+			v.rev.hide()
 		}
 	case "k", "up":
 		if v.sel > 0 {
 			v.sel--
+			v.rev.hide()
 		}
 	case "g":
 		v.sel = 0
+		v.rev.hide()
 	case "G":
 		v.sel = max(0, len(v.shown)-1)
+		v.rev.hide()
+
+	case "v":
+		return v.toggleReveal()
 
 	case "/":
 		v.mode = smFilter
@@ -203,8 +234,9 @@ func (v *passView) updateList(msg tea.KeyMsg) (view, tea.Cmd) {
 			return v, failure("no entry selected")
 		}
 		// pass decrypts and hands the value straight to the clipboard helper, then clears it again
-		// by itself. keyforge never sees the password — which is why there is no "reveal" beside
-		// this: it would be strictly more exposure for strictly less use.
+		// by itself, so this path never brings the password through keyforge at all. [v] does, and
+		// that is the whole difference between them: this one is for using the password, that one
+		// is for reading it.
 		return v, func() tea.Msg {
 			return execMsg{
 				cmd:  passstore.CopyCmd(e.Name),
@@ -336,6 +368,42 @@ func (v *passView) updateConfirm(msg tea.KeyMsg) (view, tea.Cmd) {
 	}
 }
 
+// toggleReveal decrypts the selected entry and puts its password on screen, or takes it away again.
+//
+// The value never becomes a Go string on the way here: `pass show` writes into a pipe passstore
+// opens itself and the bytes land in locked memory. It becomes one only for the instant it is drawn,
+// which is unavoidable — a terminal takes strings.
+func (v *passView) toggleReveal() (view, tea.Cmd) {
+	if v.rev.on {
+		v.rev.hide()
+		return v, nil
+	}
+	e, ok := v.current()
+	if !ok {
+		return v, failure("no entry selected")
+	}
+	sec, err := passstore.Reveal(e.Name)
+	if err != nil {
+		return v, failure("%v", err)
+	}
+	v.revealed = sec
+	return v, tea.Batch(
+		v.rev.show(),
+		status("%s is on screen for %s — [v] hides it now", e.Leaf, short(revealTimeout)),
+	)
+}
+
+// revealedLine renders the password when it is showing, and says so when it is not.
+func (v *passView) revealedLine(room int) string {
+	if !v.rev.on || v.revealed == nil {
+		return stDim.Render("  password     ") + stDim.Render("•••••••• ") + stKey.Render("[v]") + stDim.Render(" shows it")
+	}
+	shown := ""
+	v.revealed.Use(func(s string) { shown = trunc(s, room) })
+	return stDim.Render("  password     ") + stFg.Render(shown) +
+		stWarn.Render("   on screen — [v] hides it")
+}
+
 // renderDetail shows what is known about an entry without showing the entry.
 //
 // The password is decrypted to read any of this — the whole file comes out at once — but it is
@@ -358,6 +426,8 @@ func (v *passView) renderDetail(w int) string {
 	row("modified", e.Modified.Format("2006-01-02 15:04")+
 		stDim.Render(fmt.Sprintf("  (%d days ago)", int(time.Since(e.Modified).Hours()/24))))
 
+	b.WriteString(v.revealedLine(room) + "\n")
+
 	switch {
 	case v.detailErr != "":
 		b.WriteString("\n" + stWarn.Render("  the fields cannot be read: "+trunc(v.detailErr, room)) + "\n")
@@ -369,8 +439,9 @@ func (v *passView) renderDetail(w int) string {
 		for _, k := range sortedKeys(v.detailFields) {
 			row(k, stFg.Render(trunc(v.detailFields[k], room)))
 		}
-		b.WriteString("\n" + stDim.Render("  The password is not shown here. [c] hands it straight to the clipboard\n"+
-			"  without passing through keyforge, and pass clears it after 45 seconds."))
+		b.WriteString("\n" + stDim.Render("  [c] hands the password straight to the clipboard without it passing\n"+
+			"  through keyforge at all, and pass clears it after 45 seconds. [v] brings\n"+
+			"  it here instead — read it, and it goes away by itself."))
 	}
 	return stBox.Width(w - 2).Render(b.String())
 }
@@ -497,10 +568,10 @@ func (v *passView) Footer() string {
 	case smConfirm:
 		return joinHints(hint("y", "delete"), hint("other", "cancel"))
 	case smDetail:
-		return joinHints(hint("esc", "back"))
+		return joinHints(revealHint(v.rev.on), hint("esc", "back"))
 	}
 	return joinHints(
-		hint("a", "new"), hint("e", "change"), hint("c", "copy"),
+		hint("a", "new"), hint("e", "change"), hint("c", "copy"), revealHint(v.rev.on),
 		hint("m", "move"), hint("d", "delete"), hint("/", "filter"),
 		hint("enter", "details"), hint("p", "master password"),
 	)

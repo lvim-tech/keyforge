@@ -25,6 +25,11 @@ type genView struct {
 	// same one the Passwords tab uses, so a generated password and a typed one are written by identical
 	// code — there is no second, slightly different path into the store.
 	form *passForm
+
+	// rev masks the generated value until [v] is pressed. It used to print in the clear and stay
+	// there: a phrase generated to be written down would sit on the screen for as long as the tab
+	// was open, which is the one place a password is easiest to take and hardest to notice.
+	rev reveal
 }
 
 func newGenView() *genView {
@@ -44,6 +49,8 @@ func (v *genView) capturesInput() bool { return v.form != nil }
 func (v *genView) Init() tea.Cmd { return nil }
 
 func (v *genView) regen() {
+	// A fresh value is a different secret; consent to seeing the last one does not carry over.
+	v.rev.hide()
 	var err error
 	if v.phrase {
 		v.value, v.bits, err = passgen.Phrase(v.po)
@@ -59,6 +66,11 @@ func (v *genView) regen() {
 }
 
 func (v *genView) Update(msg tea.Msg) (view, tea.Cmd) {
+	// The hide timer is not a key press and arrives by broadcast, so it has to be taken before the
+	// cast below throws away everything that is not one.
+	if v.rev.expired(msg) {
+		return v, nil
+	}
 	key, ok := msg.(tea.KeyMsg)
 	if !ok {
 		return v, nil
@@ -87,6 +99,8 @@ func (v *genView) Update(msg tea.Msg) (view, tea.Cmd) {
 	}
 
 	switch key.String() {
+	case "v":
+		return v, v.rev.toggle()
 	case "r", " ":
 		v.regen()
 	case "m":
@@ -181,7 +195,11 @@ func (v *genView) Render(w, h int) string {
 		return b.String()
 	}
 
-	b.WriteString(indent(stBox.Render(stFg.Render(v.value)), 2) + "\n\n")
+	shown := mask(v.value)
+	if v.rev.on {
+		shown = v.value
+	}
+	b.WriteString(indent(stBox.Render(stFg.Render(shown)), 2) + "\n\n")
 
 	label, detail := passgen.Strength(v.bits)
 	st := stGood
@@ -212,8 +230,8 @@ func (v *genView) Render(w, h int) string {
 	}
 
 	b.WriteString("\n" + stNote.Render("  A word phrase is the better choice for a key passphrase:") + "\n")
-	b.WriteString(stDim.Render("  it is long, it is memorable, and a wrong keyboard layout shows\n"+
-		"  at once — unlike a string hidden behind asterisks.") + "\n")
+	b.WriteString(stDim.Render("  it is long, it is memorable, and once you show it with [v] a wrong\n"+
+		"  keyboard layout is obvious at a glance — unlike a string behind asterisks.") + "\n")
 
 	return b.String()
 }
@@ -223,7 +241,7 @@ func (v *genView) Footer() string {
 		return v.form.footer()
 	}
 	base := []string{
-		hint("r", "new"), hint("m", "mode"), hint("c", "copy"),
+		hint("r", "new"), revealHint(v.rev.on), hint("m", "mode"), hint("c", "copy"),
 		hint("+/-", "length"), hint("u", "capitals"), hint("d", "digits"), hint("y", "separator"),
 	}
 	if passstore.Available() {

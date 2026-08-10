@@ -344,6 +344,64 @@ func CopyCmd(name string) *exec.Cmd {
 	return sys.Interactive("pass", "show", "--clip", name)
 }
 
+// Reveal decrypts an entry and returns its password in locked memory.
+//
+// This is the one call in the package that hands the password back, and it is built so that doing
+// so costs as little as it can. `pass show` writes into a pipe this package owns, and the bytes are
+// read straight into an mlocked buffer: no heap string, nothing for the collector to duplicate,
+// nothing that cannot be wiped. The caller must Close the result.
+//
+// It exists because a password you can only copy is a password you cannot read off the screen to
+// type into a phone, and that turned out to be a real thing people need. It is still the weaker
+// path — the value ends up on a screen — which is why the view puts it behind its own key, hides it
+// again on a timer, and never turns it on by itself.
+func Reveal(name string) (*sys.Secret, error) {
+	if err := ValidName(name); err != nil {
+		return nil, err
+	}
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return nil, fmt.Errorf("pipe: %w", err)
+	}
+	cmd := exec.Command("pass", "show", name)
+	cmd.Stdout = pw
+	errb := &strings.Builder{}
+	cmd.Stderr = errb
+	// No stdin, for the same reason Run has none: with the agent locked, pinentry must fail rather
+	// than block behind a TUI that has already painted over its question.
+	cmd.Stdin = nil
+
+	if err := cmd.Start(); err != nil {
+		_ = pr.Close()
+		_ = pw.Close()
+		return nil, fmt.Errorf("pass show: %w", err)
+	}
+	// Our copy of the write end must go, or the read below never sees EOF.
+	_ = pw.Close()
+
+	// 4 KB is far more than any password and still one page of locked memory.
+	sec, err := sys.NewSecret(4096)
+	if err != nil {
+		_ = pr.Close()
+		_ = cmd.Wait()
+		return nil, err
+	}
+	_, rerr := sec.ReadFrom(pr)
+	_ = pr.Close()
+
+	if err := cmd.Wait(); err != nil {
+		sec.Close()
+		return nil, fmt.Errorf("%s", firstLine(errb.String(), "gpg did not unlock the entry"))
+	}
+	if rerr != nil {
+		sec.Close()
+		return nil, rerr
+	}
+	// Only line one is the password; the metadata below it is dropped inside the locked buffer.
+	sec.TruncateAt('\n')
+	return sec, nil
+}
+
 // Fields returns an entry's metadata — and deliberately not its password.
 //
 // The whole record has to be decrypted to read any of it, so the first line necessarily passes

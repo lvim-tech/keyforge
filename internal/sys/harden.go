@@ -169,6 +169,57 @@ func (s *Secret) WriteTo(w io.Writer) (int64, error) {
 	return int64(n), err
 }
 
+// ReadFrom fills the buffer from r, which is how a secret ENTERS locked memory from a pipe.
+//
+// The transfer needs somewhere to land between the read and the copy, and that somewhere is a fixed
+// array wiped before returning — a plain io.ReadAll would leave the whole value in a heap slice
+// that grew by reallocation, scattering copies nobody can reach. This is the mirror of WriteTo:
+// together they let a value travel process-to-process without becoming a Go string at either end.
+func (s *Secret) ReadFrom(r io.Reader) (int64, error) {
+	if s == nil {
+		return 0, nil
+	}
+	var chunk [512]byte
+	defer func() {
+		for i := range chunk {
+			chunk[i] = 0
+		}
+	}()
+	var total int64
+	for {
+		n, err := r.Read(chunk[:])
+		if n > 0 {
+			s.Append(chunk[:n])
+			total += int64(n)
+		}
+		if err == io.EOF {
+			return total, nil
+		}
+		if err != nil {
+			return total, err
+		}
+	}
+}
+
+// TruncateAt cuts the buffer at the first occurrence of b, wiping what follows.
+//
+// A `pass` entry is the password on line one and metadata below it; this is how the metadata is
+// dropped without the whole record ever existing as a string that could be split with strings.Cut.
+func (s *Secret) TruncateAt(b byte) {
+	if s == nil {
+		return
+	}
+	for i := 0; i < s.n; i++ {
+		if s.buf[i] == b {
+			for j := i; j < s.n; j++ {
+				s.buf[j] = 0
+			}
+			s.n = i
+			return
+		}
+	}
+}
+
 // Set replaces the contents in place, so a generated value can be dropped into a field that is
 // already holding a locked buffer instead of allocating a second one beside it.
 func (s *Secret) Set(b []byte) {
