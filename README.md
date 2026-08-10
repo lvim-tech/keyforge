@@ -121,16 +121,21 @@ unavoidable: a terminal takes strings.
 
 ## The lock
 
-`Ctrl+L` covers keyforge over. It opens again by proving you can use the GPG key the store is
+One key covers keyforge over. It opens again by proving you can use the GPG key the store is
 encrypted to — gpg asks through pinentry, keyforge never sees the passphrase, and there is no second
 password to remember and no hash of one on disk.
 
 ```json
-"lock": { "idle_minutes": 10, "clear_agent": true }
+"lock": { "idle_minutes": 10, "clear_agent": true, "key": "ctrl+x" }
 ```
 
 `idle_minutes` locks after that much quiet; `0`, the default, means the lock only happens when you
-ask for it.
+ask for it. `key` is that ask — `""` removes it and leaves only the timer.
+
+The key is configurable because a terminal is already full of bindings that belong to something
+else: `ctrl+l` is the obvious choice and is a tmux window binding on many setups, and a redraw
+almost everywhere. Note that whatever is set here is taken by the shell **before** any tab sees it,
+so binding a key a tab uses takes that key away from the tab.
 
 **Locking clears the gpg agent, and that is the whole of why it is worth having.** keyforge holds
 none of the data it shows — `pass` does, `~/.ssh` does — so covering this interface cannot stop

@@ -57,6 +57,13 @@ type Lock struct {
 	IdleMinutes int `json:"idle_minutes"`
 	// ClearAgent drops the gpg-agent passphrase cache when locking.
 	ClearAgent bool `json:"clear_agent"`
+	// Key locks on demand. Empty means there is no such key and only the idle timer locks.
+	//
+	// Configurable because a terminal is already full of bindings that are somebody else's: the
+	// obvious choice, ctrl+l, is a tmux window binding on this machine and a redraw everywhere else.
+	// Whatever is chosen here is claimed by the shell BEFORE any tab sees it, so picking a key a tab
+	// needs takes it away from that tab.
+	Key string `json:"key"`
 }
 
 // Agent is keyforge's view of how long the REAL master password stays active.
@@ -111,7 +118,7 @@ func Default() Config {
 	}
 	// The lock is off until asked for. A tool that starts demanding a passphrase on its own, on a
 	// machine where nothing has been decided yet, teaches people to turn it off rather than to use it.
-	c.Lock = Lock{IdleMinutes: 0, ClearAgent: true}
+	c.Lock = Lock{IdleMinutes: 0, ClearAgent: true, Key: "ctrl+x"}
 	c.Sheet.Strip = buildStrip
 	if n, err := strconv.Atoi(strings.TrimSpace(buildStripCount)); err == nil && n >= 0 {
 		c.Sheet.StripCount = n

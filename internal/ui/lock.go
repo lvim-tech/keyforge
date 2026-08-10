@@ -32,6 +32,7 @@ type lockState struct {
 	// enabled and idle come from the config; a zero idle means the lock was never asked for.
 	idle       time.Duration
 	clearAgent bool
+	key        string // the on-demand lock key, "" for none
 
 	locked bool
 	// unlocking is set while gpg has the terminal, so the tick does not re-lock underneath it.
@@ -60,6 +61,7 @@ func newLockState(c config.Config) lockState {
 	l := lockState{
 		idle:       time.Duration(c.Lock.IdleMinutes) * time.Minute,
 		clearAgent: c.Lock.ClearAgent,
+		key:        strings.TrimSpace(c.Lock.Key),
 		last:       time.Now(),
 	}
 	// The recipient is enough: the unlock decrypts, so it needs the key the store is encrypted TO,
@@ -176,6 +178,9 @@ func (l lockState) render(w, h int) string {
 func (l lockState) footer() string {
 	return joinHints(hint("enter", "unlock"), hint("q", "quit"))
 }
+
+// hotkey reports the on-demand lock key, or "" when none is configured.
+func (l lockState) hotkey() string { return l.key }
 
 // lockStatus is the one-line summary for the interface, so the setting is visible rather than a
 // thing that happens to you.

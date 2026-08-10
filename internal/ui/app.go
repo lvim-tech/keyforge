@@ -165,19 +165,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		m.lock.touch()
-		switch msg.String() {
-		case "ctrl+c":
-			m.quit = true
-			return m, tea.Quit
-		case "ctrl+l":
-			// Locking by hand is the case that actually gets used: you are leaving the desk now, not
-			// in however many minutes the idle timer says.
+		// The on-demand lock is checked before the fixed keys, because it is configurable and the
+		// user is entitled to bind it to something this shell would otherwise have swallowed.
+		// Locking by hand is the case that actually gets used: you are leaving the desk now, not in
+		// however many minutes the idle timer says.
+		if k := m.lock.hotkey(); k != "" && msg.String() == k {
 			if !m.lock.available() {
 				return m, failure("no GPG key to unlock against — the lock needs one")
 			}
 			m.lock.lock("locked by hand")
 			m.status = ""
 			return m, lockTick()
+		}
+		switch msg.String() {
+		case "ctrl+c":
+			m.quit = true
+			return m, tea.Quit
 		case "tab", "l", "right":
 			if !m.viewCaptures() {
 				m.active = (m.active + 1) % len(m.views)
@@ -272,8 +275,8 @@ func (m Model) View() string {
 	}
 
 	shell := []string{hint("tab", "next tab"), hint("q", "quit")}
-	if m.lock.available() {
-		shell = append(shell, hint("ctrl+l", "lock"))
+	if m.lock.available() && m.lock.hotkey() != "" {
+		shell = append(shell, hint(m.lock.hotkey(), "lock"))
 	}
 	foot := stFooter.Render(joinHints(shell...) + "   " + m.views[m.active].Footer())
 	if s := m.lock.status(); s != "" {
