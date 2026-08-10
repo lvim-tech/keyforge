@@ -119,6 +119,51 @@ show` writes into a pipe keyforge opens itself and the bytes are read into locke
 decrypted password never becomes a Go string except for the instant it is drawn. That instant is
 unavoidable: a terminal takes strings.
 
+## The lock
+
+`Ctrl+L` covers keyforge over. It opens again by proving you can use the GPG key the store is
+encrypted to — gpg asks through pinentry, keyforge never sees the passphrase, and there is no second
+password to remember and no hash of one on disk.
+
+```json
+"lock": { "idle_minutes": 10, "clear_agent": true }
+```
+
+`idle_minutes` locks after that much quiet; `0`, the default, means the lock only happens when you
+ask for it.
+
+**Locking clears the gpg agent, and that is the whole of why it is worth having.** keyforge holds
+none of the data it shows — `pass` does, `~/.ssh` does — so covering this interface cannot stop
+anyone who can reach the account; they would run `pass show`. Worse, with the passphrase still
+cached gpg opens the unlock challenge without prompting, so the lock would spring open on an empty
+keypress for as long as the cache lasts, which is exactly the window it exists to cover. Clearing
+first makes the prompt real, and shuts the store while it is at it: after locking, `pass show` in
+another terminal asks too.
+
+The cost is that the agent is shared. Locking keyforge also makes your other terminals and your
+signed commits ask again. Set `clear_agent` to `false` if that is not the trade you want, and the
+lock will say plainly, on its own screen, that it is now only hiding the screen.
+
+The lock needs a GPG key to exist; without `pass` set up there is nothing to unlock against, and
+keyforge says so rather than inventing a password to fill the gap.
+
+## How long the store stays open
+
+The real timer is not keyforge's. Everything in `pass` is shut by the passphrase on one GPG key, and
+how long that stays entered is decided by gpg-agent. keyforge can set it, but writes it where the
+agent will read it rather than keeping a copy of its own — a lifetime remembered here and enforced
+nowhere would describe a protection that is not in force:
+
+```json
+"agent": { "default_cache_ttl": 600, "max_cache_ttl": 7200 }
+```
+
+Seconds; `0` leaves gpg-agent's own configuration alone. The values are written into
+`~/.gnupg/gpg-agent.conf` — with the `-ssh` variants alongside them, or an ssh key would stay open
+after the store had shut — and only when they differ from what is already there. Applying them on
+every launch would reload the agent every time, and a reload drops every cached passphrase: keyforge
+would be logging you out of your own store each time it started.
+
 ## The rule for the sheet
 
 The sheet must not be the password itself. Two rules, both carried by ordinary characters that the
@@ -146,8 +191,9 @@ the sheet ends up showing the round number you asked for.
 | written to `~/.config/keyforge/config.json` | written nowhere |
 |---|---|
 | which characters are stripped | **what stands behind the marker** |
-| how many are inserted | |
+| how many are inserted | **any password at all** |
 | which characters are markers | |
+| when to lock, and whether to clear the agent | |
 
 The structure can also be built into the binary, if you would rather not have a config file at all:
 
