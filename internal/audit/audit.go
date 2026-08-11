@@ -148,6 +148,7 @@ func Run() Report {
 	}
 	rep.Findings = append(rep.Findings, agentState()...)
 	rep.Findings = append(rep.Findings, passStore()...)
+	rep.Findings = append(rep.Findings, pinentry()...)
 	rep.Findings = append(rep.Findings, systemChecks(rep.Root)...)
 
 	hosts, hashed := sshkeys.KnownHosts()
@@ -257,6 +258,54 @@ func passStore() []Finding {
 			fmt.Sprintf("mode %04o — the contents are encrypted, but the entry names are not", fi.Mode().Perm()),
 			"chmod -R go-rwx " + passstore.Dir(),
 		})
+	}
+	return out
+}
+
+// pinentry audits the prompt itself — the last link in the chain and the least examined one.
+//
+// Everything else here asks whether a secret is protected. This asks whether the question
+// can be put to you at all, and whether the program putting it is one you want holding the
+// answer. On this machine both went wrong at once and neither made a sound.
+func pinentry() []Finding {
+	if !gpgkeys.Available() {
+		return nil
+	}
+	p := gpgkeys.CurrentPinentry()
+	var out []Finding
+
+	if p.Path == "" {
+		return []Finding{{
+			High, "pinentry",
+			"none is configured and none is on PATH — nothing can ask for a passphrase, so every gpg operation needing one fails",
+			"install one and set pinentry-program in " + p.ConfPath,
+		}}
+	}
+
+	name := filepath.Base(p.Path)
+
+	if p.X11Only && gpgkeys.SessionIsWayland() {
+		out = append(out, Finding{
+			High, "pinentry",
+			name + " is X11-only and this session is Wayland with no DISPLAY — it cannot open a window, so anything started without a terminal (a launcher, a browser, a service) gets no prompt at all and fails without saying why",
+			"switch to one that speaks Wayland: pinentry-program /usr/bin/pinentry-qt in " + p.ConfPath,
+		})
+	}
+
+	if p.LinksKeyring && gpgkeys.KeyringRunning() {
+		out = append(out, Finding{
+			Warn, "pinentry",
+			name + " links libsecret and a keyring daemon is running, so it can offer to store the passphrase — which would leave the store guarded by your login password rather than by something you know",
+			"decline that offer, or use a pinentry with no keyring support",
+		})
+	}
+
+	if len(out) == 0 {
+		src := "found on PATH"
+		if p.FromConfig {
+			src = "set in " + p.ConfPath
+		}
+		out = append(out, Finding{Info, "pinentry", name + " will ask (" + src + ")", ""})
 	}
 	return out
 }

@@ -8,6 +8,7 @@ import (
 
 	"github.com/lvim-tech/keyforge/internal/passgen"
 	"github.com/lvim-tech/keyforge/internal/passstore"
+	"github.com/lvim-tech/keyforge/internal/sheet"
 )
 
 // passForm is the one form that writes a secret into `pass`, shared by the generator — where the
@@ -41,7 +42,21 @@ type passForm struct {
 	// refuses.
 	metaErr string
 
+	// What the entry looked like when the form opened, so submit can tell what actually
+	// changed. Without it every save would rewrite the file, and rewriting is the expensive
+	// half — it needs the passphrase, while a rename does not.
+	origLogin string
+	origURL   string
+
 	folders []string
+
+	// The rule, read on demand: ctrl+g must respect it for the same reason the Generator does
+	// — a password this form creates is one the paper may later have to carry.
+	rules *ruleCache
+	// po is the phrase shape this form generates with: the config's word count and separator,
+	// or the Generator's live settings when the form was opened from there. Held rather than
+	// rebuilt from passgen's defaults, which is what made ctrl+g ignore the config entirely.
+	po passgen.PhraseOptions
 }
 
 // newPassForm builds an empty form for a new entry. folder pre-fills the path, so adding a second
@@ -50,7 +65,7 @@ func newPassForm(folder string) *passForm {
 	f := &passForm{
 		title:   "New entry in pass",
 		path:    newInput("path", "websites/example.com/user@example.com"),
-		sec:     newSecretInput("password", "type the existing one, or ctrl+g for a new one"),
+		sec:     newSecretInput("password", "type one, or ctrl+g for a new one"),
 		confirm: newSecretInput("repeat", "the same one again"),
 		login:   newInput("login", "optional — what goes in the username field"),
 		url:     newInput("url", "optional — https://…"),
@@ -77,11 +92,13 @@ func newPassFormGenerated(value string, bits float64) *passForm {
 // the form says so rather than silently writing the entry back with its login and url missing.
 func newPassFormReplace(name string, fields map[string]string, readErr string) *passForm {
 	f := newPassForm("")
-	f.title = "Change the password of " + name
+	f.title = "Edit " + name
 	f.replace, f.fixed = true, name
-	f.field = 1 // the path is not in the ring when replacing; start on the password
+	f.field = 1 // start on the password; the path is above it and rarely the thing being changed
+	f.path.set(name)
 	f.login.set(fields["login"])
 	f.url.set(fields["url"])
+	f.origLogin, f.origURL = fields["login"], fields["url"]
 	if readErr != "" {
 		f.metaErr = readErr
 	}
@@ -92,21 +109,28 @@ func newPassFormReplace(name string, fields map[string]string, readErr string) *
 // confirmation appears only for a typed value.
 func (f *passForm) fieldOrder() []int {
 	// 0 path · 1 secret · 2 confirm · 3 login · 4 url
-	var out []int
-	if !f.replace {
-		out = append(out, 0)
-	}
-	out = append(out, 1)
+	// The path is editable in an edit too: renaming is the one change `pass` can make
+	// without opening the file, and a form that would not let you do it sent you to a
+	// different command for the cheapest operation there is.
+	out := []int{0, 1}
 	if f.needsConfirm() {
 		out = append(out, 2)
 	}
 	return append(out, 3, 4)
 }
 
+// keepsExisting reports an edit that is leaving the password alone.
+//
+// The password field starts empty in an edit, because there is nothing sensible to pre-fill
+// a masked field with. So empty means "the one already there", and the login and url mean
+// the opposite — they ARE pre-filled, so whatever is left in them is what gets written.
+// Stated on the form rather than left to be discovered.
+func (f *passForm) keepsExisting() bool { return f.replace && f.sec.empty() }
+
 // needsConfirm reports whether the value has to be typed twice. A generated one does not: it was
 // never typed, so there is nothing to have mistyped, and `pass insert` skips its own second prompt
 // on the same reasoning when it is fed a value.
-func (f *passForm) needsConfirm() bool { return f.bits == 0 }
+func (f *passForm) needsConfirm() bool { return f.bits == 0 && !f.keepsExisting() }
 
 func (f *passForm) next(d int) {
 	order := f.fieldOrder()
@@ -131,10 +155,30 @@ func (f *passForm) update(msg tea.KeyMsg) tea.Cmd {
 		f.next(-1)
 		return nil
 	case "ctrl+g":
-		v, bits, err := passgen.Phrase(passgen.DefaultPhraseOptions())
+		// The SAME generation as the Generator tab, for the same two reasons it exists there:
+		// the configured shape (words, separator), and the rule COMPOSED IN rather than merely
+		// avoided. This used to call passgen defaults with only the reserved characters set,
+		// so a password born in this form ignored the config and carried no marker value —
+		// and a password with no value in it prints as a sheet that is enough on its own.
+		o := f.po
+		if o.Words <= 0 {
+			o = passgen.DefaultPhraseOptions()
+		}
+		var m sheet.Mask
+		if f.rules != nil {
+			r, rerr := f.rules.get()
+			if rerr != nil {
+				// Refused rather than generated without the rule: see genView.regen.
+				return failure("%v", rerr)
+			}
+			m = r.Mask()
+			o.Reserved = m.Reserved()
+		}
+		base, bits, err := passgen.Phrase(o)
 		if err != nil {
 			return failure("generator: %v", err)
 		}
+		_, v := sheet.Compose(base, m)
 		f.sec.set(v)
 		f.confirm.reset()
 		f.bits = bits
@@ -166,42 +210,65 @@ func (f *passForm) update(msg tea.KeyMsg) tea.Cmd {
 
 // submit writes the entry and returns the name it was stored under.
 func (f *passForm) submit() (string, error) {
-	name := f.fixed
-	if !f.replace {
-		name = strings.Trim(strings.TrimSpace(f.path.String()), "/")
-		if err := passstore.ValidName(name); err != nil {
-			return "", err
-		}
+	name := strings.Trim(strings.TrimSpace(f.path.String()), "/")
+	if err := passstore.ValidName(name); err != nil {
+		return "", err
 	}
-	if f.sec.empty() {
+	if f.sec.empty() && !f.replace {
 		return "", fmt.Errorf("the password is empty")
 	}
 	if f.needsConfirm() && !f.sec.secret().Equal(f.confirm.secret()) {
 		return "", fmt.Errorf("the two entries do not match")
 	}
 
+	login := strings.TrimSpace(f.login.String())
+	url := strings.TrimSpace(f.url.String())
 	meta := map[string]string{}
-	if v := strings.TrimSpace(f.login.String()); v != "" {
-		meta["login"] = v
+	if login != "" {
+		meta["login"] = login
 	}
-	if v := strings.TrimSpace(f.url.String()); v != "" {
-		meta["url"] = v
+	if url != "" {
+		meta["url"] = url
 	}
 	if f.bits > 0 {
 		meta["generated-by"] = "keyforge"
 		meta["entropy"] = fmt.Sprintf("%.0f bits", f.bits)
 	}
 
-	var err error
-	if f.replace {
-		err = passstore.Replace(name, f.sec.secret(), meta)
-	} else {
-		err = passstore.InsertSecret(name, f.sec.secret(), meta)
+	if !f.replace {
+		return name, passstore.InsertSecret(name, f.sec.secret(), meta)
 	}
-	if err != nil {
-		return "", err
+
+	// An edit is up to three different operations, and telling them apart is the whole
+	// point of this branch. Renaming moves the ciphertext and never opens it. Rewriting the
+	// contents needs the password in hand, which — when it is being kept rather than
+	// replaced — means reading it back first. Doing the second when only the first was asked
+	// for would demand a passphrase for changing a folder name.
+	renamed := name != f.fixed
+	if renamed {
+		if err := passstore.Move(f.fixed, name); err != nil {
+			return "", err
+		}
 	}
-	return name, nil
+
+	contentsChanged := !f.sec.empty() || login != f.origLogin || url != f.origURL
+	if !contentsChanged {
+		if renamed {
+			return name, nil
+		}
+		return name, fmt.Errorf("nothing was changed")
+	}
+
+	if f.sec.empty() {
+		cur, rerr := passstore.Reveal(name)
+		if rerr != nil {
+			return "", fmt.Errorf("the password could not be read back, so it cannot be kept: %v", rerr)
+		}
+		err := passstore.Replace(name, cur, meta)
+		cur.Close()
+		return name, err
+	}
+	return name, passstore.Replace(name, f.sec.secret(), meta)
 }
 
 // close releases the locked buffers. Every path out of the form goes through it — a form abandoned
@@ -215,12 +282,14 @@ func (f *passForm) render(w int) string {
 	var b strings.Builder
 	b.WriteString(stAccent.Render("  "+f.title) + "\n\n")
 
+	b.WriteString("  " + f.path.render(f.focused(0)) + "\n")
 	if f.replace {
-		b.WriteString("  " + stDim.Render("path: ") + stFg.Render(f.fixed) + "\n")
-	} else {
-		b.WriteString("  " + f.path.render(f.focused(0)) + "\n")
+		b.WriteString(stDim.Render("           changing it renames the entry — no passphrase needed for that") + "\n")
 	}
 	b.WriteString("  " + f.sec.render(f.focused(1)) + "\n")
+	if f.replace && f.sec.empty() {
+		b.WriteString(stDim.Render("           leave it blank to keep the password that is there") + "\n")
+	}
 	if f.needsConfirm() {
 		b.WriteString("  " + f.confirm.render(f.focused(2)) + "\n")
 	} else if f.bits > 0 {

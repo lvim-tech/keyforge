@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -18,10 +19,22 @@ type input struct {
 	cursor int
 	width  int
 	hint   string
+
+	// masked hides the contents behind dots.
+	//
+	// Used for the parts of the printing rule. They are not passwords, but they are the
+	// legend of the paper: somebody who reads "q7" off this screen can turn a printed sheet
+	// back into the password on it. A field that shows them while they are being chosen
+	// undoes the point of storing them encrypted afterwards.
+	masked bool
 }
 
 func newInput(label, hint string) input {
 	return input{label: label, hint: hint, width: 40}
+}
+
+func newMaskedInput(label, hint string) input {
+	return input{label: label, hint: hint, width: 40, masked: true}
 }
 
 func (i *input) set(s string) {
@@ -80,6 +93,25 @@ func (i *input) update(msg tea.KeyMsg) bool {
 
 // render draws the field, marking the cursor position and showing the hint when empty.
 func (i input) render(focused bool) string {
+	if i.masked {
+		label := stDim.Render(i.label + ": ")
+		if focused {
+			label = stKey.Render(i.label + ": ")
+		}
+		if len(i.value) == 0 {
+			if focused {
+				return label + stRowSel.Render(" ")
+			}
+			return label + stDim.Render(i.hint)
+		}
+		// One dot per CHARACTER and the count beside it — the same honesty the passphrase
+		// field owes: a mask that counts bytes says nothing true about what was typed.
+		dots := strings.Repeat("•", len(i.value))
+		if focused {
+			dots += stRowSel.Render(" ")
+		}
+		return label + stFg.Render(dots) + stDim.Render(fmt.Sprintf("  (%d)", len(i.value)))
+	}
 	text := string(i.value)
 	if text == "" && !focused {
 		text = stDim.Render(i.hint)

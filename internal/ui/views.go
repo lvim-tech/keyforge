@@ -91,19 +91,29 @@ func (v *auditView) Render(w, h int) string {
 			if idx == v.sel {
 				mark = stKey.Render(pointer) + " "
 			}
-			tag := stDim.Render("·")
+			// The dot is coloured through a style that CARRIES the row background, and the
+			// rest goes through cell — never a pre-rendered string inside another Render.
+			// lipgloss wraps a rendered line in one sequence, so the inner style's reset ended
+			// the selection background after the first glyph and the row was highlighted for
+			// exactly one character.
+			row := stRow
+			if idx == v.sel {
+				row = stRowSel
+			}
+			bg := row.GetBackground()
+			dot, dotStyle := "·", stDim.Background(bg)
 			switch sev {
 			case audit.High:
-				tag = stBad.Render("●")
+				dot, dotStyle = "●", stBad.Background(bg)
 			case audit.Warn:
-				tag = stWarn.Render("●")
+				dot, dotStyle = "●", stWarn.Background(bg)
 			}
-			line := fmt.Sprintf("%s %-22s %s", tag, trunc(f.Subject, 22), f.Message)
+			line := dotStyle.Render(dot) + " " +
+				cell(trunc(f.Subject, 22), 22, row) + " " +
+				cell(f.Message, maxi(w-32, 8), row)
+			b.WriteString(mark + line + "\n")
 			if idx == v.sel {
-				b.WriteString(mark + stRowSel.Render(padTo(line, w-4)) + "\n")
 				b.WriteString("     " + stNote.Render("→ "+f.Action) + "\n")
-			} else {
-				b.WriteString(mark + stRow.Render(line) + "\n")
 			}
 			idx++
 		}
@@ -198,6 +208,11 @@ func (v *gpgView) Render(w, h int) string {
 		case !k.Expires.IsZero():
 			expText, expStyle = k.Expires.Format("2006-01-02"), stFg
 		}
+		// Named when it is the subkey's, because "expired" against a primary key that is fine
+		// sends the reader to renew the wrong thing.
+		if k.ExpiryIsSubkey && expText != "never" {
+			expText += " (sub)"
+		}
 		uid := ""
 		if len(k.UIDs) > 0 {
 			uid = k.UIDs[0]
@@ -226,23 +241,38 @@ func (v *gpgView) Footer() string {
 
 type certView struct {
 	list   []certs.Cert
+	roots  []string
 	sel    int
 	loaded bool
 }
 
-func newCertView() *certView { return &certView{} }
+// newCertView takes the roots from the config, falling back to the built-in list.
+//
+// `cert_paths` was declared in the Config type and read by nothing: the scan always used
+// DefaultPaths, so a machine that keeps its certificates somewhere else could name the
+// directory in the config and watch keyforge ignore it. A field that is written and never
+// read describes a setting that does not exist.
+func newCertView(roots []string) *certView {
+	if len(roots) == 0 {
+		roots = certs.DefaultPaths()
+	}
+	return &certView{roots: roots}
+}
 
-func (v *certView) Title() string { return "Certificates" }
-func (v *certView) Init() tea.Cmd { return loadCerts }
+func (v *certView) Title() string { return "Certs" }
+func (v *certView) Init() tea.Cmd { return v.load() }
 
 type certsLoaded struct{ list []certs.Cert }
 
-func loadCerts() tea.Msg { return certsLoaded{list: certs.Scan(certs.DefaultPaths(), 2)} }
+func (v *certView) load() tea.Cmd {
+	roots := v.roots
+	return func() tea.Msg { return certsLoaded{list: certs.Scan(roots, 2)} }
+}
 
 func (v *certView) Update(msg tea.Msg) (view, tea.Cmd) {
 	switch msg := msg.(type) {
 	case reloadMsg:
-		return v, loadCerts
+		return v, v.load()
 	case certsLoaded:
 		v.list = msg.list
 		v.loaded = true
@@ -260,7 +290,7 @@ func (v *certView) Update(msg tea.Msg) (view, tea.Cmd) {
 				v.sel--
 			}
 		case "r":
-			return v, loadCerts
+			return v, v.load()
 		}
 	}
 	return v, nil
@@ -271,7 +301,7 @@ func (v *certView) Render(w, h int) string {
 		return stDim.Render("  looking for certificates…")
 	}
 	if len(v.list) == 0 {
-		return stDim.Render("  no certificates found in " + strings.Join(certs.DefaultPaths(), ", "))
+		return stDim.Render("  no certificates found in " + strings.Join(v.roots, ", "))
 	}
 	var b strings.Builder
 	b.WriteString(stDim.Render(fmt.Sprintf("  %-32s %-24s %s", "subject", "validity", "file")) + "\n")

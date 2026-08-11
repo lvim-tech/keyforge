@@ -37,9 +37,12 @@ func main() {
 	var (
 		doAudit = flag.Bool("audit", false, "print the audit as text and exit (for scripts and cron)")
 		doGen   = flag.Bool("gen", false, "generate one password and print it")
-		words   = flag.Int("words", 5, "number of words for --gen")
-		chars   = flag.Int("chars", 0, "if >0, --gen makes a character string of this length instead of a phrase")
-		showVer = flag.Bool("version", false, "version")
+		// Defaults come from the config, so --gen agrees with the tabs; an explicit flag still
+		// wins, because that is what an explicit flag is for.
+		genCfg, _ = config.Load()
+		words     = flag.Int("words", firstPositive(genCfg.PhraseWords, 5), "number of words for --gen")
+		chars     = flag.Int("chars", 0, "if >0, --gen makes a character string of this length instead of a phrase")
+		showVer   = flag.Bool("version", false, "version")
 	)
 	flag.Usage = usage
 	flag.Parse()
@@ -134,7 +137,20 @@ func runAudit() int {
 // the assessment still reaches a human:
 //
 //	keyforge --gen | pass insert -e ssh/newkey
+//
+// firstPositive picks the configured value, falling back to the built-in one.
+func firstPositive(a, b int) int {
+	if a > 0 {
+		return a
+	}
+	return b
+}
+
 func runGen(words, chars int) int {
+	// The config, like every other entry point. This built passgen's bare defaults, so a
+	// machine configured for 30-character passwords or 7-word phrases got 20 and 5 here.
+	cfg, _ := config.Load()
+
 	var (
 		value string
 		bits  float64
@@ -143,10 +159,16 @@ func runGen(words, chars int) int {
 	if chars > 0 {
 		o := passgen.DefaultOptions()
 		o.Length = chars
+		if cfg.Ambiguous != "" {
+			o.Ambiguous = cfg.Ambiguous
+		}
 		value, bits, err = passgen.Password(o)
 	} else {
 		o := passgen.DefaultPhraseOptions()
 		o.Words = words
+		if cfg.Separator != "" {
+			o.Separator = cfg.Separator
+		}
 		value, bits, err = passgen.Phrase(o)
 	}
 	if err != nil {
@@ -156,6 +178,15 @@ func runGen(words, chars int) int {
 	label, detail := passgen.Strength(bits)
 	fmt.Println(value)
 	fmt.Fprintf(os.Stderr, "%s · %s\n", capitalise(label), detail)
+
+	// SAID, NOT SILENTLY APPLIED. Reading the rule needs the passphrase, and a flag meant for
+	// `keyforge --gen | pass insert …` in a script must never stop for a prompt. So the honest
+	// thing is a warning on stderr — which a pipe does not carry — rather than a password that
+	// looks fine and can never be put on a masked sheet.
+	if cfg.Sheet.RuleFrom != "" {
+		fmt.Fprintln(os.Stderr,
+			"note: this password was made without the stored rule, so it cannot go on a masked sheet")
+	}
 	return 0
 }
 

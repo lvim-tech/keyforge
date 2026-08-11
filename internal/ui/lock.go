@@ -41,8 +41,11 @@ type lockState struct {
 
 	recipient string // the GPG key the store encrypts to
 	challenge string // ciphertext only that key can open; the unlock is opening it
-	reason    string // why it locked, shown on the curtain
-	err       string
+	// gpgErr collects what gpg said while it had the terminal, so a refusal can be reported as the
+	// reason it happened rather than as a number.
+	gpgErr *strings.Builder
+	reason string // why it locked, shown on the curtain
+	err    string
 }
 
 // lockTickMsg drives the idle check.
@@ -69,6 +72,12 @@ func newLockState(c config.Config) lockState {
 	if passstore.Available() {
 		l.recipient = passstore.Recipient()
 	}
+	// Locked before anything is drawn, so the first thing seen is the curtain rather than a
+	// list of entry names. The names are not the secret, but they are the list of every site
+	// you have an account with, and that is not nothing.
+	if c.Lock.AtStart && l.available() {
+		l.lock("locked on opening")
+	}
 	return l
 }
 
@@ -90,22 +99,35 @@ func (l *lockState) lock(reason string) {
 	}
 	// Built before the cache is cleared, because encrypting needs no passphrase and a lock that
 	// cannot produce its own challenge would be a lock with no key.
+	//
+	// IT LOCKS EITHER WAY. This used to return here, leaving `locked` false and the reason in
+	// `l.err` — which is rendered on the curtain, the very thing that was not drawn. The caller
+	// then cleared the status line and wiped the views, so the idle timer would fire, nothing
+	// would happen, and the screen stayed open with the passwords on it. Failing open is the
+	// one outcome a lock may not have, and it failed open in silence.
+	//
+	// A curtain with no challenge cannot be opened by [enter] — unlockCmd says so plainly —
+	// but it can always be left by [q], which quits cleanly. Covered and escapable beats
+	// uncovered and confident.
 	ch, err := gpgkeys.NewChallenge(l.recipient)
-	if err != nil {
-		l.err = "no unlock challenge could be made: " + err.Error()
-		return
-	}
 	l.clearChallenge()
 	l.challenge = ch
 	l.locked, l.reason, l.err = true, reason, ""
+	if err != nil {
+		l.err = "no unlock challenge could be made: " + err.Error() + " — [q] quits"
+	}
 
 	if !l.clearAgent {
 		return
 	}
-	if err := gpgkeys.ClearCache(); err != nil {
+	if cerr := gpgkeys.ClearCache(); cerr != nil {
 		// Worth saying out loud: the lock is now weaker than it claims, and silence here would be
-		// the difference between a lock and a picture of one.
-		l.err = "the agent was not cleared: " + err.Error()
+		// the difference between a lock and a picture of one. Appended rather than assigned, so
+		// it cannot erase the missing-challenge line above.
+		if l.err != "" {
+			l.err += "; "
+		}
+		l.err += "the agent was not cleared: " + cerr.Error()
 	}
 }
 
@@ -138,8 +160,27 @@ func (l *lockState) unlockCmd() tea.Cmd {
 		return failure("there is no unlock challenge — locking failed to make one")
 	}
 	l.unlocking = true
-	cmd := gpgkeys.UnlockCmd(l.challenge)
+	l.gpgErr = &strings.Builder{}
+	cmd := gpgkeys.UnlockCmd(l.challenge, l.gpgErr)
 	return tea.ExecProcess(cmd, func(err error) tea.Msg { return unlockDoneMsg{err: err} })
+}
+
+// failedWith turns a non-zero exit into something worth reading.
+func (l *lockState) failedWith(err error) string {
+	said := ""
+	if l.gpgErr != nil {
+		for _, line := range strings.Split(strings.TrimSpace(l.gpgErr.String()), "\n") {
+			line = strings.TrimSpace(line)
+			// gpg narrates every step; only its complaints are of any use here.
+			if strings.HasPrefix(line, "gpg: ") && !strings.Contains(line, "encrypted with") {
+				said = strings.TrimPrefix(line, "gpg: ")
+			}
+		}
+	}
+	if said == "" {
+		return "not unlocked: " + err.Error()
+	}
+	return "not unlocked: " + said
 }
 
 // render draws the curtain. Nothing of the interface behind it is drawn — a lock that leaves the

@@ -48,8 +48,20 @@ const (
 	symSafe = "-_.+=" // same key on every layout this tool is likely to meet
 	symFull = "!@#$%^&*()[]{}<>?/|~;:,"
 	// Glyphs a human reads wrong off a terminal, and the ones a Cyrillic layout shuffles.
+	//
+	// The last four are here for a reason this program learned the hard way: `|`, a backtick,
+	// an apostrophe and a double quote sit on keys that MOVE between layouts, so a password
+	// carrying one can be typed correctly and still be wrong — which is exactly how a master
+	// passphrase gets lost. They are dropped alongside the look-alikes, not because they read
+	// badly but because they type badly.
 	ambiguous = "0O1lI|`'\""
 )
+
+// DefaultAmbiguous is the built-in set, so the interface can SHOW what it drops rather than
+// carry a hand-typed copy of it. The label used to read "(0O1lI)" while four more characters
+// were being removed — a screen that under-reports what it withholds teaches the reader to
+// distrust the rest of it.
+func DefaultAmbiguous() string { return ambiguous }
 
 // Options controls the character generator.
 type Options struct {
@@ -58,7 +70,11 @@ type Options struct {
 	Digits     bool
 	SymbolsAll bool // include the full symbol set, not just the layout-stable ones
 	Symbols    bool
-	NoAmbig    bool // drop 0/O/1/l/I and friends
+	NoAmbig    bool // drop the look-alike and layout-unstable glyphs
+	// Ambiguous is the set NoAmbig removes. Empty means DefaultAmbiguous: configurable
+	// because which glyphs are unreadable depends on the font, and which are unstable
+	// depends on the layouts the reader actually switches between.
+	Ambiguous string
 	// Reserved characters are never produced. They exist so that a printed sheet can carry them as
 	// decoys: because the generator cannot emit them, every occurrence on paper is noise, and the
 	// person who knows the rule strips them by eye. Kept ordinary (a letter, a digit) rather than
@@ -69,7 +85,7 @@ type Options struct {
 // DefaultOptions is a 20-character password that survives being retyped: mixed case, digits and
 // only the stable symbols, with the confusable glyphs removed.
 func DefaultOptions() Options {
-	return Options{Length: 20, Upper: true, Digits: true, Symbols: true, NoAmbig: true}
+	return Options{Length: 20, Upper: true, Digits: true, Symbols: true, NoAmbig: true, Ambiguous: ambiguous}
 }
 
 // alphabet assembles the character pool for the given options.
@@ -91,7 +107,11 @@ func (o Options) alphabet() string {
 	set := sb.String()
 	drop := ""
 	if o.NoAmbig {
-		drop += ambiguous
+		if o.Ambiguous != "" {
+			drop += o.Ambiguous
+		} else {
+			drop += ambiguous
+		}
 	}
 	drop += o.Reserved
 	if drop != "" {
@@ -179,16 +199,39 @@ func Phrase(o PhraseOptions) (string, float64, error) {
 	// reserved letter shrinks the choice, and reporting the larger number would overstate it.
 	bits := float64(o.Words) * math.Log2(float64(len(pool)))
 	if o.Number {
-		n, err := pick(100)
-		if err != nil {
-			return "", 0, err
+		// The digits are filtered too. The rejection above covered only the WORDS, so a rule
+		// reserving "7" still let one digit group in five carry a 7 — which Compose/Apply then
+		// deleted from the real password, leaving a shorter group than was asked for and a bits
+		// figure that counted the full log2(100). The guarantee this function states is "by any
+		// path"; two of the three components it assembles were not on that path.
+		digits := ""
+		for _, d := range "0123456789" {
+			if !strings.ContainsRune(o.Reserved, d) {
+				digits += string(d)
+			}
 		}
-		parts = append(parts, fmt.Sprintf("%02d", n))
-		bits += math.Log2(100)
+		if len(digits) < 2 {
+			return "", 0, fmt.Errorf("the reserved characters leave too few digits for a number group")
+		}
+		var group string
+		for i := 0; i < 2; i++ {
+			n, err := pick(len(digits))
+			if err != nil {
+				return "", 0, err
+			}
+			group += string(digits[n])
+		}
+		parts = append(parts, group)
+		bits += 2 * math.Log2(float64(len(digits)))
 	}
 	sep := o.Separator
 	if sep == "" {
 		sep = "-"
+	}
+	// The separator is CONFIGURATION, so a clash is refused rather than silently stripped: a
+	// reserved separator would evaporate from every real password and join the words together.
+	if o.Reserved != "" && strings.ContainsAny(sep, o.Reserved) {
+		return "", 0, fmt.Errorf("the separator %q is one of the characters the rule removes", sep)
 	}
 	return strings.Join(parts, sep), bits, nil
 }

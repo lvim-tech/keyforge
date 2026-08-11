@@ -6,48 +6,52 @@ import (
 	"testing"
 )
 
-// The guarantee that matters: no field of the persisted type can hold a marker's value, so no
-// mistake in the UI can serialise the secret. This test fails the moment someone adds one.
-func TestConfigCannotHoldSecrets(t *testing.T) {
+// The config must not be able to hold the rule at all. This is the guarantee that replaced a
+// comment: a struct that cannot carry the noise characters or the marker values cannot leak
+// them, however careless a later change is. They live encrypted in `pass`; this file keeps
+// only the name of that entry.
+func TestTheConfigCannotHoldTheRule(t *testing.T) {
 	c := Default()
-	c.Sheet.Strip = "q7"
-	c.Sheet.StripCount = 2
-	c.Sheet.SetMarkers("zj")
-	b, err := json.Marshal(c)
+	c.Sheet.RuleFrom = "notes/2026"
+	blob, err := json.Marshal(c)
 	if err != nil {
 		t.Fatal(err)
 	}
-	blob := string(b)
-	for _, forbidden := range []string{"Qx9", "value", "expand", "secret", "pepper"} {
-		if strings.Contains(strings.ToLower(blob), strings.ToLower(forbidden)) {
-			t.Fatalf("the serialised config contains %q: %s", forbidden, blob)
+	for _, forbidden := range []string{"strip", "markers", "marker", "values", "expand"} {
+		if strings.Contains(strings.ToLower(string(blob)), forbidden) {
+			t.Errorf("the serialised config contains %q: %s", forbidden, blob)
 		}
 	}
-	if !strings.Contains(blob, `"markers":["z","j"]`) {
-		t.Fatalf("the markers are not written: %s", blob)
+	if !strings.Contains(string(blob), "notes/2026") {
+		t.Errorf("the pointer was not written: %s", blob)
 	}
 }
 
-func TestParseValues(t *testing.T) {
-	got, err := ParseValues("z=Qx9, j=!Bg")
+// A name says nothing about what is inside, so an empty one must simply mean "no rule" — not
+// an error, not a prompt. Most machines will never have one.
+func TestNoRuleIsTheOrdinaryState(t *testing.T) {
+	c := Default()
+	if c.Sheet.RuleFrom != "" {
+		t.Errorf("a fresh config points somewhere: %q", c.Sheet.RuleFrom)
+	}
+	blob, _ := json.Marshal(c)
+	if strings.Contains(string(blob), "rule_from") {
+		t.Errorf("an absent rule still leaves a key behind: %s", blob)
+	}
+}
+
+func TestParseValuesStillRejectsMalformedPairs(t *testing.T) {
+	if _, err := ParseValues("zz=two-character-marker"); err == nil {
+		t.Error("a two-character marker must be an error")
+	}
+	if _, err := ParseValues("z="); err == nil {
+		t.Error("an empty value must be an error")
+	}
+	got, err := ParseValues("z=Qx9\nj=other")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got['z'] != "Qx9" || got['j'] != "!Bg" {
-		t.Fatalf("got %v", got)
-	}
-	if _, err := ParseValues("zz=Qx9"); err == nil {
-		t.Fatal("a two-character marker must be an error")
-	}
-	if _, err := ParseValues("z="); err == nil {
-		t.Fatal("an empty value must be an error")
-	}
-}
-
-func TestSetMarkersDedupes(t *testing.T) {
-	var s Sheet
-	s.SetMarkers("z,z j")
-	if len(s.Markers) != 2 {
-		t.Fatalf("want 2 markers, got %v", s.Markers)
+	if len(got) != 2 || got['z'] != "Qx9" {
+		t.Errorf("got %v", got)
 	}
 }

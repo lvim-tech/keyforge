@@ -1,6 +1,7 @@
 package sheet
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 )
@@ -61,6 +62,20 @@ func (m Mask) expandKeys() []rune {
 // 20-character password that prints as 22 is a small tell, and a small tell is still a tell.
 func (m Mask) Overhead() int { return m.StripN + len(m.Expand) }
 
+// RealOverhead is how many characters the markers add to the PASSWORD, as opposed to the paper.
+//
+// The two differ and both are needed. A marker is INSERTED into the base rather than replacing
+// one of its characters, so on the paper it costs one character and in the password it costs the
+// whole of what it stands for. The generator that shows the PAPER subtracts Overhead; the one
+// that shows the PASSWORD subtracts this, and both land on the round number the user asked for.
+func (m Mask) RealOverhead() int {
+	n := 0
+	for _, v := range m.Expand {
+		n += len([]rune(v))
+	}
+	return n
+}
+
 // Empty reports whether the mask does nothing, in which case paper and password are the same.
 func (m Mask) Empty() bool { return m.StripN <= 0 && len(m.Expand) == 0 }
 
@@ -90,6 +105,80 @@ func Compose(base string, m Mask) (paper, real string) {
 	paper = string(out)
 	real = Apply(paper, m)
 	return paper, real
+}
+
+// ComposeExisting hides a password that ALREADY EXISTS, which is a weaker thing than
+// composing one, and the difference is worth stating rather than papering over.
+//
+// Noise always applies: it is removed by the reader, so what is left is exactly what went in.
+//
+// MARKERS APPLY WHERE THE PASSWORD ACTUALLY CONTAINS WHAT THEY STAND FOR. A marker is expanded
+// on the way back, so it can only replace a run of characters equal to its value — which is
+// precisely the case for a password this program generated under the same rule, since the
+// value is sitting in it verbatim. Refusing markers outright, as this used to, meant that
+// changing a password the proper way and importing it again produced a sheet with only noise
+// on it, and no way to tell why. Where the value is not present the marker is dropped, and
+// markersDropped says so.
+//
+// THE ROUND TRIP IS VERIFIED, NOT REASONED ABOUT. After the substitutions the paper is put
+// back through Apply and compared with the password; anything short of an exact match falls
+// back to noise alone. Marker values can interact — one value can be formed by replacing
+// another — and the failure would be a sheet that reconstructs a plausible wrong password.
+// That is the one outcome this whole design exists to prevent, so it is checked rather than
+// argued.
+//
+// AND IT REFUSES A PASSWORD THAT ALREADY CONTAINS A RESERVED CHARACTER. This is the whole
+// reason the function returns an error. When a password is generated, the generator is told
+// which characters are reserved and never produces them, so every one on the paper is
+// unambiguously noise. A password that came from somewhere else has made no such promise: if
+// the rule says "delete every q" and the password contains a q of its own, the reader deletes
+// that too and reconstructs something that is not the password. The sheet would look
+// perfectly ordinary and be wrong — discovered at the one moment a paper backup is ever
+// used, which is the moment nothing else is left.
+func ComposeExisting(secret string, m Mask) (paper string, markersDropped bool, err error) {
+	reserved := m.Reserved()
+	for _, r := range secret {
+		if strings.ContainsRune(reserved, r) {
+			return "", false, fmt.Errorf(
+				"it contains %q, which the rule treats as noise — the sheet would reconstruct the wrong password",
+				r)
+		}
+	}
+	body, applied := m.placeMarkers(secret)
+	if Apply(body, m) != secret {
+		body, applied = secret, 0
+	}
+
+	out := []rune(body)
+	strip := []rune(m.Strip)
+	for i := 0; i < m.StripN && len(strip) > 0; i++ {
+		idx, perr := pick(len(strip))
+		if perr != nil {
+			break
+		}
+		out = insertRandom(out, strip[idx])
+	}
+	return string(out), applied < len(m.Expand), nil
+}
+
+// placeMarkers substitutes each marker for every occurrence of what it stands for, and reports
+// how many markers found a home.
+//
+// Longest value first, so that a value which contains another is consumed before its own
+// substring can be taken out from under it.
+func (m Mask) placeMarkers(secret string) (string, int) {
+	keys := m.expandKeys()
+	sort.Slice(keys, func(i, j int) bool { return len(m.Expand[keys[i]]) > len(m.Expand[keys[j]]) })
+	applied := 0
+	for _, k := range keys {
+		v := m.Expand[k]
+		if v == "" || !strings.Contains(secret, v) {
+			continue
+		}
+		secret = strings.ReplaceAll(secret, v, string(k))
+		applied++
+	}
+	return secret, applied
 }
 
 // Apply performs, in code, exactly what the reader does by eye: delete the noise, substitute the

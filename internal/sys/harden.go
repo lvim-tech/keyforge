@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
 )
@@ -125,7 +126,11 @@ func (s *Secret) Len() int {
 	if s == nil {
 		return 0
 	}
-	return len([]rune(string(s.buf[:s.n])))
+	// utf8.RuneCount, not len([]rune(string(...))). The string conversion allocated an ordinary
+	// heap copy of the secret — one per call, and this is called on every render frame to draw
+	// the count beside the mask. The locked buffer beneath it was doing nothing while the
+	// garbage collector held a dozen copies it may move and cannot be told to erase.
+	return utf8.RuneCount(s.buf[:s.n])
 }
 
 // Empty reports whether anything has been entered.
@@ -218,6 +223,32 @@ func (s *Secret) TruncateAt(b byte) {
 			return
 		}
 	}
+}
+
+// DropThrough wipes everything up to and including the first b, keeping what follows.
+//
+// The mirror of TruncateAt, for the caller that wants the OTHER half. `pass show` returns the
+// password on line one and metadata below it; a reader that needs only the metadata still has
+// the password in its buffer, and erasing it in place is the difference between "the password
+// was not returned" and "the password is not here".
+func (s *Secret) DropThrough(b byte) {
+	if s == nil {
+		return
+	}
+	for i := 0; i < s.n; i++ {
+		if s.buf[i] != b {
+			continue
+		}
+		rest := s.n - (i + 1)
+		copy(s.buf[:rest], s.buf[i+1:s.n])
+		for j := rest; j < s.n; j++ {
+			s.buf[j] = 0
+		}
+		s.n = rest
+		return
+	}
+	// No separator at all means the whole buffer was the password.
+	s.Reset()
 }
 
 // Set replaces the contents in place, so a generated value can be dropped into a field that is

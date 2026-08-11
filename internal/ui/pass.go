@@ -7,7 +7,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/lvim-tech/keyforge/internal/config"
 	"github.com/lvim-tech/keyforge/internal/gpgkeys"
+	"github.com/lvim-tech/keyforge/internal/passgen"
 	"github.com/lvim-tech/keyforge/internal/passstore"
 	"github.com/lvim-tech/keyforge/internal/sys"
 )
@@ -24,6 +26,9 @@ const (
 )
 
 type passView struct {
+	// po is the configured phrase shape, handed to any form this view opens.
+	po passgen.PhraseOptions
+
 	entries []passstore.Entry
 	shown   []passstore.Entry // entries after the filter
 	sel     int
@@ -52,10 +57,24 @@ type passView struct {
 	// shared timer fires or the pane is left. Never turned on by itself.
 	rev      reveal
 	revealed *sys.Secret
+
+	// Handed to every form this tab opens, so a password created here honours the rule.
+	rules *ruleCache
 }
 
-func newPassView() *passView {
+func newPassView(c config.Config, rules *ruleCache) *passView {
+	// The phrase shape from the config, so ctrl+g in this tab's form produces the same kind of
+	// passphrase as everywhere else rather than passgen's bare defaults.
+	po := passgen.DefaultPhraseOptions()
+	if c.PhraseWords > 0 {
+		po.Words = c.PhraseWords
+	}
+	if c.Separator != "" {
+		po.Separator = c.Separator
+	}
 	v := &passView{
+		rules:  rules,
+		po:     po,
 		move:   newInput("new path", "websites/example.com/user"),
 		filter: newInput("filter", "part of the path"),
 	}
@@ -126,6 +145,12 @@ func (v *passView) applyFilter() {
 func (v *passView) Update(msg tea.Msg) (view, tea.Cmd) {
 	// The hide timer arrives by broadcast rather than as a key press, so it is taken first.
 	if v.rev.expired(msg) {
+		return v, nil
+	}
+	if _, ok := msg.(forgetMsg); ok {
+		// A password revealed on screen when the lock closes is a password on screen.
+		v.rev.hide()
+		v.detailFields, v.detailErr = nil, ""
 		return v, nil
 	}
 	switch msg := msg.(type) {
@@ -209,6 +234,7 @@ func (v *passView) updateList(msg tea.KeyMsg) (view, tea.Cmd) {
 			folder = e.Folder
 		}
 		v.form = newPassForm(folder)
+		v.form.rules, v.form.po = v.rules, v.po
 		v.mode = smForm
 
 	case "e":
@@ -226,6 +252,7 @@ func (v *passView) updateList(msg tea.KeyMsg) (view, tea.Cmd) {
 			fields = map[string]string{}
 		}
 		v.form = newPassFormReplace(e.Name, fields, readErr)
+		v.form.rules, v.form.po = v.rules, v.po
 		v.mode = smForm
 
 	case "c":
@@ -528,6 +555,14 @@ func (v *passView) renderList(w, h int) string {
 		line := cell("    "+e.Leaf, maxi(w-26, 20), row) + " " +
 			cell(e.Modified.Format("2006-01-02"), 12, age)
 		b.WriteString(mark + line + "\n")
+	}
+
+	// [v] works from the list too, and until now it decrypted the entry, announced "on screen
+	// for 30s", and drew nothing: revealedLine was called only by the detail pane. A password
+	// held in locked memory for half a minute, announced, and never shown is the worst trade
+	// of the three — all of the exposure and none of the use.
+	if v.rev.on && v.revealed != nil {
+		b.WriteString("\n" + v.revealedLine(maxi(w-20, 24)) + "\n")
 	}
 
 	b.WriteString("\n" + stDim.Render(fmt.Sprintf("  %d %s in %s", len(v.entries), plural(len(v.entries), "entry", "entries"), passstore.Dir())))

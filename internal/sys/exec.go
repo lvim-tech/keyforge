@@ -14,7 +14,9 @@ package sys
 
 import (
 	"bytes"
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -83,7 +85,28 @@ func RunIn(dir, name string, args ...string) (Result, error) {
 func Interactive(name string, args ...string) *exec.Cmd {
 	cmd := exec.Command(name, args...)
 	cmd.Env = os.Environ()
+	// GPG_TTY is how gpg tells its agent which terminal to put pinentry on. Without it the agent
+	// falls back to whatever terminal it inherited when it was STARTED, which is a different one
+	// as often as not — pinentry then either fails outright ("Inappropriate ioctl for device") or,
+	// worse, draws its dialog on somebody else's screen and leaves mouse tracking switched on there.
+	// The passphrase prompt has to appear on the terminal keyforge just handed over, and this is the
+	// documented way to say so.
+	if t := TTYName(); t != "" {
+		cmd.Env = append(cmd.Env, "GPG_TTY="+t)
+	}
 	return cmd
+}
+
+// TTYName is the terminal this process is attached to, or "" when there is none.
+//
+// Read from the descriptor rather than from $TTY or ttyname(3), because the value that matters is
+// the one the child will actually be handed — under tea.ExecProcess that is this process's stdin.
+func TTYName() string {
+	n, err := os.Readlink("/proc/self/fd/0")
+	if err != nil || !strings.HasPrefix(n, "/dev/") {
+		return ""
+	}
+	return n
 }
 
 // Have reports whether a tool is on PATH. Views use it to grey out what this machine cannot do
@@ -116,5 +139,44 @@ func Clipboard(text string) error {
 		cmd.Stdin = strings.NewReader(text)
 		return cmd.Run()
 	}
-	return errors.New("no clipboard helper (wl-copy / xclip)")
+	// OSC 52, the fallback this function's comment has always promised and never had. It asks
+	// the TERMINAL to hold the text, which is the only mechanism that works over SSH and inside
+	// tmux, where neither helper exists. Written to /dev/tty rather than stdout: stdout may be
+	// a pipe, and a control sequence in a pipe is corruption rather than a copy.
+	//
+	// The terminal may refuse — kitty wants clipboard_control, and some multiplexers pass it on
+	// only when configured — and there is no reply to read, so this reports success on having
+	// sent it. That is honest about what it knows: the alternative is claiming failure on every
+	// terminal that quietly complies.
+	if tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0); err == nil {
+		defer func() { _ = tty.Close() }()
+		payload := base64.StdEncoding.EncodeToString([]byte(text))
+		if _, err := fmt.Fprintf(tty, "\x1b]52;c;%s\a", payload); err == nil {
+			return nil
+		}
+	}
+	return errors.New("no clipboard helper (wl-copy / xclip) and the terminal would not take it")
+}
+
+// ClearClipboard empties whatever Clipboard filled.
+//
+// The Passwords tab copies through `pass show --clip`, which wipes itself after 45 seconds, and
+// the interface says so. The Generator copied through the helper above and left the value there
+// for ever — in the clipboard and in every clipboard manager's history — on the one tab whose
+// values are brand-new master-passphrase candidates.
+func ClearClipboard() {
+	if Have("wl-copy") {
+		_ = exec.Command("wl-copy", "--clear").Run()
+		return
+	}
+	if Have("xclip") {
+		cmd := exec.Command("xclip", "-selection", "clipboard")
+		cmd.Stdin = strings.NewReader("")
+		_ = cmd.Run()
+		return
+	}
+	if tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0); err == nil {
+		defer func() { _ = tty.Close() }()
+		_, _ = fmt.Fprint(tty, "\x1b]52;c;!\a")
+	}
 }

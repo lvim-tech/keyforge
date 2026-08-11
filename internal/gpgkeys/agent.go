@@ -2,9 +2,11 @@ package gpgkeys
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -171,26 +173,49 @@ func ChangePassphraseCmd(keyID string) *exec.Cmd {
 // the passphrase has to be entered again — by keyforge to unlock, and by anything else that wants
 // the store.
 //
-// It is deliberately blunt. `gpgconf --reload gpg-agent` drops the caches for every key rather than
-// one, which is right for a lock — locking your session should not leave a different key of yours
-// still open — and is the reason it is a setting rather than the default behaviour: the agent is
-// shared with your other terminals and with signed commits.
+// It clears every key rather than one, which is right for a lock — locking your session should not
+// leave a different key of yours still open — and is the reason it is a setting rather than
+// unconditional: the agent is shared with your other terminals and with signed commits.
+//
+// CLEAR_PASSPHRASE, addressed by keygrip — the agent's own cache id for a private key — rather than
+// `gpgconf --reload gpg-agent`. A reload does drop the caches, but it does so as a side effect of
+// re-reading the configuration file: it is a request to reload, and forgetting is not what it is
+// for. CLEAR_PASSPHRASE says the thing that is meant, key by key, and answers OK or does not.
+//
+// THE RESULT IS VERIFIED RATHER THAN ASSUMED, and that is the part that matters. This lock once
+// announced it had shut the store and then opened again without asking for anything: the clearing
+// step had been called, its return value was nil, and nobody had ever checked whether the agent
+// actually let go. "I asked the agent to forget" and "the agent forgot" are different claims, and
+// only the second one is worth putting on a screen that says the store is locked.
 func ClearCache() error {
-	if sys.Have("gpgconf") {
-		res, err := sys.Run("gpgconf", "--reload", "gpg-agent")
-		if err == nil && res.OK() {
-			return nil
+	if !sys.Have("gpg-connect-agent") {
+		return fmt.Errorf("gpg-connect-agent is not on this machine")
+	}
+	before := Protections()
+	var failed []string
+	for grip, p := range before {
+		if !p.Cached {
+			continue
+		}
+		res, err := sys.Run("gpg-connect-agent", "CLEAR_PASSPHRASE --mode=normal "+grip, "/bye")
+		if err != nil || !res.OK() {
+			failed = append(failed, grip[:8])
 		}
 	}
-	if !sys.Have("gpg-connect-agent") {
-		return fmt.Errorf("neither gpgconf nor gpg-connect-agent is on this machine")
+	if len(failed) > 0 {
+		return fmt.Errorf("the agent would not forget %s", strings.Join(failed, ", "))
 	}
-	res, err := sys.Run("gpg-connect-agent", "reloadagent", "/bye")
-	if err != nil {
-		return err
+	// Ask again. A cache that is still holding something after being told to let go is worth
+	// reporting loudly: the lock is then weaker than the screen it just drew says it is.
+	var still []string
+	for grip, p := range Protections() {
+		if p.Cached {
+			still = append(still, grip[:8])
+		}
 	}
-	if !res.OK() {
-		return fmt.Errorf("gpg-connect-agent: %s", strings.TrimSpace(res.Stderr))
+	if len(still) > 0 {
+		sort.Strings(still)
+		return fmt.Errorf("still cached after clearing: %s", strings.Join(still, ", "))
 	}
 	return nil
 }
@@ -257,10 +282,24 @@ func NewChallenge(recipient string) (string, error) {
 // passphrase to produce it. keyforge never handles that passphrase — pinentry asks, gpg keeps it,
 // and this process learns only whether the exit code was zero.
 //
-// Interactive, because pinentry-curses wants the real terminal; the caller hands it to
-// tea.ExecProcess like every other passphrase-bearing command in this program.
-func UnlockCmd(challenge string) *exec.Cmd {
-	return sys.Interactive("gpg", "--quiet", "--decrypt", "--output", os.DevNull, "--yes", challenge)
+// Interactive, because pinentry wants the real terminal; the caller hands it to tea.ExecProcess
+// like every other passphrase-bearing command in this program.
+//
+// stderr is captured rather than left on the screen. gpg explains itself there — "No pinentry",
+// "Inappropriate ioctl for device", "Bad passphrase" are three completely different problems — but
+// the TUI repaints the moment gpg exits, so anything printed is gone before it can be read. Without
+// this the only thing left is an exit code, which says nothing about which of the three it was.
+func UnlockCmd(challenge string, stderr io.Writer) *exec.Cmd {
+	// The plaintext goes to stdout and is discarded there, NOT to --output /dev/null. gpg writes
+	// through a temporary "<output>.part" and renames it into place, so asking it to write to
+	// /dev/null makes it try to create /dev/null.part inside /dev — which fails with "Permission
+	// denied" and no prompt ever appears. Discarding the stream sidesteps the temporary file
+	// entirely, and pinentry is unaffected: it draws on the terminal named by GPG_TTY, not on
+	// gpg's stdout.
+	cmd := sys.Interactive("gpg", "--decrypt", challenge)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = stderr
+	return cmd
 }
 
 // firstLine reduces a tool's complaint to the part worth putting on a one-line status bar.
@@ -346,8 +385,19 @@ func SetCacheTTL(defaultTTL, maxTTL time.Duration) error {
 	if err := os.WriteFile(path, []byte(strings.TrimLeft(out, "\n")), 0o600); err != nil {
 		return err
 	}
-	// A written file the agent has not read is still just a file.
-	return ClearCache()
+	// A written file the agent has not read is still just a file — and CLEAR_PASSPHRASE, which
+	// this used to call, does not make it read one. It flushes the cached passphrases and
+	// leaves the running agent on its old lifetimes, so the numbers written here were never in
+	// force; EnsureCacheTTL then compared against the FILE, found them already there, and
+	// reported "unchanged" for ever. `gpgconf --reload gpg-agent` is the command that makes the
+	// agent re-read its configuration, and it is what this program's own audit tab tells the
+	// user to run.
+	if res, err := sys.Run("gpgconf", "--reload", "gpg-agent"); err != nil {
+		return err
+	} else if !res.OK() {
+		return fmt.Errorf("gpgconf --reload gpg-agent: %s", strings.TrimSpace(res.Stderr))
+	}
+	return nil
 }
 
 // EnsureCacheTTL applies the configured lifetimes only when they are not already in force.

@@ -53,13 +53,32 @@ func dir() string {
 // Dir is the store location, for showing where entries actually live.
 func Dir() string { return dir() }
 
-// Recipient returns the GPG id the store encrypts to, for display.
+// Recipient returns the PRIMARY GPG id the store encrypts to.
+//
+// The first line, not the whole file. `.gpg-id` holds one id per line — `pass init a b` is
+// ordinary on a shared store — and returning all of them joined by newlines was fed straight
+// into `gpg --encrypt --recipient` as ONE id, which broke the lock's challenge and the
+// encryption-keygrip lookup on exactly those stores. Every caller here wants the primary one.
 func Recipient() string {
+	for _, r := range Recipients() {
+		return r
+	}
+	return ""
+}
+
+// Recipients returns every id in .gpg-id, for the places that must not pretend there is one.
+func Recipients() []string {
 	b, err := os.ReadFile(filepath.Join(dir(), ".gpg-id"))
 	if err != nil {
-		return ""
+		return nil
 	}
-	return strings.TrimSpace(string(b))
+	var out []string
+	for _, l := range strings.Split(string(b), "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			out = append(out, l)
+		}
+	}
+	return out
 }
 
 // Entry is one record: its full store path, the folder it sits in, and when it was last written.
@@ -356,6 +375,23 @@ func CopyCmd(name string) *exec.Cmd {
 // path — the value ends up on a screen — which is why the view puts it behind its own key, hides it
 // again on a timer, and never turns it on by itself.
 func Reveal(name string) (*sys.Secret, error) {
+	sec, err := decrypt(name)
+	if err != nil {
+		return nil, err
+	}
+	// Only line one is the password; the metadata below it is dropped inside the locked buffer.
+	sec.TruncateAt('\n')
+	return sec, nil
+}
+
+// decrypt reads a whole entry into locked memory, and is the ONLY path by which a decrypted
+// entry enters this process.
+//
+// Split out of Reveal because Fields used to take the other road — sys.Run, whose captured
+// stdout is an ordinary Go string — and so quietly reintroduced the password into heap memory
+// that nothing can wipe, on every detail view and every edit. The pipe exists precisely so
+// that never happens; having two ways in meant only one of them was true.
+func decrypt(name string) (*sys.Secret, error) {
 	if err := ValidName(name); err != nil {
 		return nil, err
 	}
@@ -397,8 +433,6 @@ func Reveal(name string) (*sys.Secret, error) {
 		sec.Close()
 		return nil, rerr
 	}
-	// Only line one is the password; the metadata below it is dropped inside the locked buffer.
-	sec.TruncateAt('\n')
 	return sec, nil
 }
 
@@ -412,27 +446,31 @@ func Fields(name string) (map[string]string, error) {
 	if err := ValidName(name); err != nil {
 		return nil, err
 	}
-	// No stdin, by Run's design: if the gpg agent is locked, pinentry fails immediately instead of
-	// hanging behind a TUI that has already painted over its question.
-	res, err := sys.Run("pass", "show", name)
+	sec, err := decrypt(name)
 	if err != nil {
 		return nil, err
 	}
-	if !res.OK() {
-		return nil, fmt.Errorf("%s", firstLine(res.Stderr, "gpg did not unlock the entry"))
-	}
+	defer sec.Close()
+
+	// The password line is ERASED in the locked buffer before anything is read out of it. What
+	// remains is metadata — a URL, a username, a note — which is not a secret and may be parsed
+	// as an ordinary string. The distinction is the whole reason this function is allowed to
+	// return a map at all.
+	sec.DropThrough('\n')
+
 	out := map[string]string{}
-	lines := strings.Split(res.Stdout, "\n")
-	for _, l := range lines[min(1, len(lines)):] {
-		k, v, ok := strings.Cut(l, ":")
-		if !ok {
-			continue
+	sec.Use(func(rest string) {
+		for _, l := range strings.Split(rest, "\n") {
+			k, v, ok := strings.Cut(l, ":")
+			if !ok {
+				continue
+			}
+			k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+			if k != "" && v != "" {
+				out[k] = v
+			}
 		}
-		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
-		if k != "" && v != "" {
-			out[k] = v
-		}
-	}
+	})
 	return out, nil
 }
 

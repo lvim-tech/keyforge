@@ -4,11 +4,11 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/lvim-tech/keyforge/internal/config"
 	"github.com/lvim-tech/keyforge/internal/passstore"
 	"github.com/lvim-tech/keyforge/internal/sshkeys"
 	"github.com/lvim-tech/keyforge/internal/sys"
@@ -33,6 +33,9 @@ const (
 )
 
 type keysView struct {
+	// rounds is the configured bcrypt-KDF cost for new keys and passphrase changes.
+	rounds int
+
 	keys   []sshkeys.Key
 	sel    int
 	mode   keysMode
@@ -49,8 +52,13 @@ type keysView struct {
 	purpose hostPurpose
 }
 
-func newKeysView() *keysView {
+// newKeysView takes the config for kdf_rounds, which until now was written by the config and
+// read by nobody: both the new-key path and the change-passphrase path used a literal 100, so a
+// user asking for stronger KDF rounds silently got the default. Same defect class as the four
+// dead fields found before it.
+func newKeysView(c config.Config) *keysView {
 	v := &keysView{
+		rounds:   c.KDFRounds,
 		fName:    newInput("file", "e.g. github-2026"),
 		fComment: newInput("comment", "user@machine"),
 		fHost:    newInput("host", "user@machine or an alias from ~/.ssh/config"),
@@ -146,7 +154,7 @@ func (v *keysView) updateList(msg tea.KeyMsg) (view, tea.Cmd) {
 		if k, ok := v.current(); ok {
 			return v, func() tea.Msg {
 				return execMsg{
-					cmd:  sshkeys.ChangePassphraseCmd(k, 100),
+					cmd:  sshkeys.ChangePassphraseCmd(k, v.rounds),
 					then: k.Name + " has a new passphrase (the key was rewritten in OpenSSH format)",
 				}
 			}
@@ -203,6 +211,9 @@ func (v *keysView) updateNew(msg tea.KeyMsg) (view, tea.Cmd) {
 			return v, failure("the file name is required")
 		}
 		spec := sshkeys.DefaultSpec()
+		if v.rounds > 0 {
+			spec.Rounds = v.rounds
+		}
 		spec.Name = strings.TrimSpace(v.fName.String())
 		spec.Comment = strings.TrimSpace(v.fComment.String())
 		spec.Type = v.fType
@@ -318,7 +329,7 @@ func (v *keysView) buildDetail(k sshkeys.Key) string {
 	}
 	if pub, err := sshkeys.PublicKey(k); err == nil {
 		b.WriteString("\n")
-		b.WriteString(stDim.Render("  public key:\n"))
+		b.WriteString(stDim.Render("  public key:") + "\n")
 		b.WriteString(stFg.Render("  " + wrap(pub, 76)))
 		b.WriteString("\n")
 	}
@@ -456,6 +467,15 @@ func (v *keysView) renderHost(w int) string {
 	return stBox.Width(w - 2).Render(b.String())
 }
 
+// shortID trims a recipient to a glance without assuming it is long enough to trim.
+func shortID(id string) string {
+	r := []rune(id)
+	if len(r) <= 8 {
+		return id
+	}
+	return string(r[:8])
+}
+
 func (v *keysView) Footer() string {
 	switch v.mode {
 	case kmNew, kmHost:
@@ -469,7 +489,10 @@ func (v *keysView) Footer() string {
 		hint("enter", "details"),
 	)
 	if passstore.Available() {
-		f += "  " + stDim.Render("· pass: "+passstore.Recipient()[:8])
+		// Clamped, not sliced. `[:8]` panicked the whole TUI on the first render of this tab
+		// whenever .gpg-id held a short uid — "bob" is a legal recipient, and an empty file
+		// passes Available(), which only stats it.
+		f += "  " + stDim.Render("· pass: "+shortID(passstore.Recipient()))
 	}
 	return f
 }
@@ -516,5 +539,3 @@ func max(a, b int) int {
 	}
 	return b
 }
-
-var _ = time.Now

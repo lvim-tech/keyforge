@@ -31,6 +31,8 @@ var (
 	stTitle = lipgloss.NewStyle().Bold(true).Foreground(cBg).Background(cBlue).Padding(0, 1)
 	stTab   = lipgloss.NewStyle().Foreground(cDim).Padding(0, 2)
 	stTabOn = lipgloss.NewStyle().Bold(true).Foreground(cBg).Background(cGreen).Padding(0, 2)
+	// The same tab with the padding taken away, for terminals too narrow for the full strip.
+	stTabTight = lipgloss.NewStyle().Foreground(cDim)
 
 	stKey    = lipgloss.NewStyle().Bold(true).Foreground(cBlue)
 	stDim    = lipgloss.NewStyle().Foreground(cDim)
@@ -76,6 +78,19 @@ func cell(s string, w int, st lipgloss.Style) string {
 	}
 	return st.Render(s + strings.Repeat(" ", w-len(r)))
 }
+
+// NEWLINES GO OUTSIDE Render, ALWAYS.
+//
+// lipgloss treats a styled string as a BLOCK: it splits on "\n" and pads every line to the width
+// of the widest one. So Render("text\n\n") does not emit two line breaks — it emits the text and
+// then two lines of spaces as wide as the text, the last of which carries no newline at all. The
+// next thing written lands on the end of that padding, which is how a note ends up starting from
+// the middle of the screen while its own second line starts at the left margin.
+//
+//	WRONG   b.WriteString(st.Render("Empty sheet.\n\n"))
+//	RIGHT   b.WriteString(st.Render("Empty sheet") + "\n\n")
+//
+// The same rule as `cell` below and for the same reason: style the text, lay out around it.
 
 // sortedKeys gives a map a stable render order, so a detail pane does not reshuffle its own rows
 // between two draws of the same thing.

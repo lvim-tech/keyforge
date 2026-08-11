@@ -38,46 +38,6 @@ type Entry struct {
 	Note   string // optional: host, username, anything worth writing down beside it
 }
 
-// Decoy scatters reserved characters through a secret so the printed sheet is not the secret.
-//
-// It relies on the generator never emitting these characters: every occurrence on paper is
-// therefore noise, and the reader who knows the rule removes them by eye with no ambiguity and no
-// tooling. The characters are meant to be ORDINARY — a letter, a digit — so the printed value looks
-// like an ordinary password. A marker glyph would announce that something was inserted; a "q"
-// announces nothing, and an attacker who does not know the scheme does not learn that it exists.
-//
-// What this is worth, stated plainly so it is not mistaken for more: it defeats someone who finds
-// the paper, and it does not defeat someone who knows the rule. Keep the characters out of every
-// config file, every note and every conversation — the secrecy of the rule IS the protection.
-//
-// Positions avoid the first and last two characters. Noise at an edge is the first thing an eye
-// notices, and on a word phrase it would deform the opening syllable, which is what makes the whole
-// line hard to read back.
-func Decoy(secret, reserved string, count int) string {
-	r := []rune(reserved)
-	if len(r) == 0 || count <= 0 {
-		return secret
-	}
-	out := []rune(secret)
-	for i := 0; i < count; i++ {
-		if len(out) < 6 {
-			break
-		}
-		span := len(out) - 4 // positions 2 … len-2
-		pos, err := pick(span)
-		if err != nil {
-			return string(out)
-		}
-		pos += 2
-		ci, err := pick(len(r))
-		if err != nil {
-			return string(out)
-		}
-		out = append(out[:pos], append([]rune{r[ci]}, out[pos:]...)...)
-	}
-	return string(out)
-}
-
 // pick returns a uniform random integer in [0,n) from the system CSPRNG. The positions of the noise
 // must be unguessable too: predictable placement would let anyone holding two sheets subtract them.
 func pick(n int) (int, error) {
@@ -143,10 +103,27 @@ func Converter() string {
 // Write renders the sheet and converts it. It returns the path of the file to print — the PDF when
 // a converter exists, the HTML otherwise — plus the HTML path, so the caller can remove both.
 func Write(o Options) (result, htmlPath string, err error) {
-	dir, _ := Dir()
+	base, _ := Dir()
+
+	// A PRIVATE DIRECTORY, because the PDF is not ours to create.
+	//
+	// The HTML below is opened 0600 and is safe from birth. The PDF is written by an external
+	// converter — chromium, weasyprint, libreoffice — under ITS umask, which on most machines
+	// means 0644, in /dev/shm, which every user on the machine can list. The chmod afterwards
+	// closes the window but does not remove it, and the file it closes is a page of passwords.
+	// A 0700 directory is the only way to cover a file we do not open ourselves: the converter
+	// can create it however it likes and nobody else can reach it.
 	stamp := time.Now().Format("20060102-150405")
-	htmlPath = filepath.Join(dir, "keyforge-"+stamp+".html")
-	pdfPath := filepath.Join(dir, "keyforge-"+stamp+".pdf")
+	dir, err := os.MkdirTemp(base, "keyforge-"+stamp+"-")
+	if err != nil {
+		return "", "", err
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		_ = os.RemoveAll(dir)
+		return "", "", err
+	}
+	htmlPath = filepath.Join(dir, "sheet.html")
+	pdfPath := filepath.Join(dir, "sheet.pdf")
 
 	// 0600 from the moment it exists: the window between creating a world-readable file and
 	// chmod-ing it is small, and on a machine with other users it is the whole attack.
@@ -188,6 +165,10 @@ func Write(o Options) (result, htmlPath string, err error) {
 // freed and that is genuinely the end of it, but on a journalling filesystem an unlink leaves the
 // blocks recoverable. That is precisely why Dir() prefers RAM.
 func Shred(paths ...string) {
+	// The private directories the files were written into, emptied above and removed after.
+	// Left behind they would be a growing list of timestamps in /dev/shm saying when this
+	// machine last printed passwords — harmless to open and not harmless to read.
+	dirs := map[string]bool{}
 	for _, p := range paths {
 		if p == "" {
 			continue
@@ -200,6 +181,14 @@ func Shred(paths ...string) {
 			}
 		}
 		_ = os.Remove(p)
+		if d := filepath.Dir(p); strings.HasPrefix(filepath.Base(d), "keyforge-") {
+			dirs[d] = true
+		}
+	}
+	for d := range dirs {
+		// Remove, not RemoveAll: an unexpected file in there is a surprise worth leaving for
+		// somebody to find rather than deleting on a guess.
+		_ = os.Remove(d)
 	}
 }
 

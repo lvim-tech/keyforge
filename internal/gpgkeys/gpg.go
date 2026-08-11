@@ -6,6 +6,8 @@
 package gpgkeys
 
 import (
+	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -18,9 +20,15 @@ type Key struct {
 	ID      string
 	Type    string // rsa4096, ed25519 …
 	Created time.Time
+	// Expires is the date that matters — the SOONEST of the primary key and the encryption
+	// subkey, not the primary's alone. The store stops working on whichever comes first.
 	Expires time.Time // zero when it never expires
-	UIDs    []string
-	Usage   string // S=sign C=certify E=encrypt A=authenticate
+	// SubkeyExpires is the encryption subkey's own date, zero when there is none.
+	SubkeyExpires time.Time
+	// ExpiryIsSubkey says the date above came from the subkey, so the interface can name it.
+	ExpiryIsSubkey bool
+	UIDs           []string
+	Usage          string // S=sign C=certify E=encrypt A=authenticate
 }
 
 // Expired reports whether the key is past its expiry.
@@ -39,12 +47,32 @@ func Available() bool { return sys.Have("gpg") }
 // the only output it promises not to change between versions.
 func List() ([]Key, error) {
 	res, err := sys.Run("gpg", "--list-secret-keys", "--with-colons", "--fixed-list-mode")
-	if err != nil || !res.OK() {
+	if err != nil {
 		return nil, err
 	}
+	// A non-zero exit returned (nil, nil), so a broken keyring rendered as "no secret GPG keys".
+	// An empty answer and a failed question are different facts, and this tab exists to report
+	// the state of the keyring rather than to summarise it away.
+	if !res.OK() {
+		msg := strings.TrimSpace(res.Stderr)
+		if i := strings.IndexByte(msg, '\n'); i >= 0 {
+			msg = msg[:i]
+		}
+		if msg == "" {
+			msg = fmt.Sprintf("gpg exited %d", res.Code)
+		}
+		return nil, errors.New(msg)
+	}
+	return parseKeys(res.Stdout), nil
+}
+
+// parseKeys reads gpg's --with-colons output. Split from List so it can be tested against a
+// canned keyring — the same shape agent.go's parseKeyInfo has, and for the same reason: the
+// interesting cases here are keyrings this machine does not happen to have.
+func parseKeys(stdout string) []Key {
 	var out []Key
 	var cur *Key
-	for _, line := range strings.Split(res.Stdout, "\n") {
+	for _, line := range strings.Split(stdout, "\n") {
 		f := strings.Split(line, ":")
 		if len(f) < 2 {
 			continue
@@ -66,6 +94,25 @@ func List() ([]Key, error) {
 			cur.Created = epoch(fieldAt(f, 5))
 			cur.Expires = epoch(fieldAt(f, 6))
 			cur.Usage = fieldAt(f, 11)
+		case "ssb":
+			// THE SUBKEY IS THE ONE THAT STOPS `pass`. This tab exists to warn about an expiry
+			// that silently breaks the store, and only the primary key's date was read — on the
+			// ordinary keyring shape (primary certifies, subkey encrypts) those are different
+			// dates, and the one on screen was the wrong one. A user could read "expires 2030"
+			// while the subkey that actually decrypts died last month.
+			if cur == nil {
+				break
+			}
+			if !strings.ContainsRune(fieldAt(f, 11), 'e') {
+				break
+			}
+			exp := epoch(fieldAt(f, 6))
+			cur.SubkeyExpires = exp
+			// The soonest of the two is what the columns show, because it is the one that bites.
+			if !exp.IsZero() && (cur.Expires.IsZero() || exp.Before(cur.Expires)) {
+				cur.Expires = exp
+				cur.ExpiryIsSubkey = true
+			}
 		case "uid":
 			if cur != nil {
 				if u := fieldAt(f, 9); u != "" {
@@ -77,7 +124,7 @@ func List() ([]Key, error) {
 	if cur != nil {
 		out = append(out, *cur)
 	}
-	return out, nil
+	return out
 }
 
 func fieldAt(f []string, i int) string {

@@ -105,3 +105,17 @@ func TestEmptyMask(t *testing.T) {
 		t.Fatalf("the empty mask reserves characters: %q", m.Reserved())
 	}
 }
+
+func TestRealOverheadLandsOnTheRequestedLength(t *testing.T) {
+	// The Generator shows the PASSWORD, so subtracting RealOverhead from the requested length
+	// has to produce a password of exactly that length. The first version subtracted one less
+	// per marker, on the wrong idea that a marker replaces a character instead of being added
+	// to the base, and every generated password came out a character long.
+	m := Mask{Strip: "q7", StripN: 3, Expand: map[rune]string{'p': "MEMORISED"}}
+	const want = 30
+	base := strings.Repeat("a", want-m.RealOverhead())
+	_, real := Compose(base, m)
+	if got := len([]rune(real)); got != want {
+		t.Errorf("asked for %d characters and got %d: %q", want, got, real)
+	}
+}
