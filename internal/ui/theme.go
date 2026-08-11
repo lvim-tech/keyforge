@@ -92,6 +92,28 @@ func cell(s string, w int, st lipgloss.Style) string {
 //
 // The same rule as `cell` below and for the same reason: style the text, lay out around it.
 
+// tail keeps the END of a string when it will not fit.
+//
+// The opposite of trunc, and the right choice for a store path: `websites/abv.bg/` is the part
+// every row shares, and the login after it is the part that tells them apart. Cutting from the
+// front leaves "…abv.bg/artdesign@abv.bg" — which names the row — instead of
+// "websites/abv.bg/artdesi…", which names the site everybody already knows.
+func tail(s string, w int) string {
+	r := []rune(s)
+	if w <= 1 || len(r) <= w {
+		return s
+	}
+	return "…" + string(r[len(r)-(w-1):])
+}
+
+// mini is the counterpart of maxi.
+func mini(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // sortedKeys gives a map a stable render order, so a detail pane does not reshuffle its own rows
 // between two draws of the same thing.
 func sortedKeys(m map[string]string) []string {

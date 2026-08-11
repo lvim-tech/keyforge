@@ -756,6 +756,15 @@ func (v *printView) Render(w, h int) string {
 	return v.renderList(w, h)
 }
 
+// columns divides the width between the label and the sheet line, leaving the rest for the
+// password. The label gets up to half the screen because it is the only column a reader uses to
+// tell one row from another; the sheet line is bounded by what a password can be.
+func (v *printView) columns(w int) (labelW, paperW int) {
+	labelW = maxi(mini(w/3, 52), 18)
+	paperW = maxi(mini(w-labelW-30, 40), 16)
+	return labelW, paperW
+}
+
 func (v *printView) renderList(w, h int) string {
 	var b strings.Builder
 
@@ -792,7 +801,12 @@ func (v *printView) renderList(w, h int) string {
 		return b.String()
 	}
 
-	b.WriteString(stDim.Render(fmt.Sprintf("     %-24s %-34s %s", "label", "on the sheet", "the password")) + "\n")
+	// The columns grow with the terminal instead of being three fixed numbers. A store shaped
+	// websites/<site>/<login> puts the identifying half at the END of the label, and 24 columns
+	// cut it off exactly there — every row read "websites/abv.bg/artdesi…", which is the same
+	// row twice as far as the reader is concerned.
+	labelW, paperW := v.columns(w)
+	b.WriteString(stDim.Render(fmt.Sprintf("     %-*s %-*s %s", labelW, "label", paperW, "on the sheet", "the password")) + "\n")
 	for i, r := range v.rows {
 		mark := "  "
 		st := stRow
@@ -810,19 +824,30 @@ func (v *printView) renderList(w, h int) string {
 		}
 		bg := st.GetBackground()
 		b.WriteString(mark + box + " " +
-			cell(r.label, 24, st) + " " +
-			cell(r.paper, 34, stFg.Background(bg)) + " " +
-			cell(real, maxi(w-70, 8), stAccent.Background(bg)) + "\n")
+			cell(tail(r.label, labelW), labelW, st) + " " +
+			cell(r.paper, paperW, stFg.Background(bg)) + " " +
+			cell(real, maxi(w-labelW-paperW-8, 8), stAccent.Background(bg)) + "\n")
 	}
 
 	// The import note belongs to the LAST IMPORT, not to the row under the cursor, and it used
 	// to be drawn only while an imported row happened to be selected. So the one line saying
 	// where ten of twelve passwords went disappeared as soon as the cursor moved off them.
 	if v.importNote != "" {
+		// Folded to the terminal. The refusals name full store paths and there can be several,
+		// so the one line that says where the missing rows went ran off the right edge — which
+		// is the same as not printing it.
 		for _, line := range strings.Split(v.importNote, "\n") {
-			b.WriteString("\n  " + stWarn.Render(strings.TrimSpace(line)))
+			b.WriteString("\n" + indent(stWarn.Render(wrapText(strings.TrimSpace(line), maxi(w-4, 30))), 2))
 		}
 		b.WriteString("\n")
+	}
+
+	// The full label of the row under the cursor, because the column above is cut to fit and
+	// two logins at the same site differ only in the part that gets cut.
+	if v.sel < len(v.rows) {
+		if full := v.rows[v.sel].label; full != "" {
+			b.WriteString("\n" + indent(stDim.Render(wrapText(full, maxi(w-4, 30))), 2) + "\n")
+		}
 	}
 
 	if v.sel < len(v.rows) && v.rows[v.sel].imported {
