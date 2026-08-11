@@ -183,6 +183,19 @@ func (v *passView) Update(msg tea.Msg) (view, tea.Cmd) {
 			switch msg.String() {
 			case "v":
 				return v.toggleReveal()
+			case "c":
+				// The pane's own text explains what [c] does — and the key did nothing here,
+				// because only the list handled it. A screen that describes a key it does not
+				// have is worse than one that stays silent: it is read as a broken program
+				// rather than as a missing feature.
+				//
+				// Same path as the list: `pass` decrypts straight into the clipboard helper and
+				// clears it again by itself, so the password never comes through keyforge.
+				e := v.detailEntry
+				if e.Name == "" {
+					return v, failure("no entry selected")
+				}
+				return v, v.copyCmd(e)
 			case "esc", "enter", "q":
 				// Leaving the pane is one of the ways a password gets left on screen; it is also
 				// the one the user is least likely to think about.
@@ -265,12 +278,7 @@ func (v *passView) updateList(msg tea.KeyMsg) (view, tea.Cmd) {
 		// by itself, so this path never brings the password through keyforge at all. [v] does, and
 		// that is the whole difference between them: this one is for using the password, that one
 		// is for reading it.
-		return v, func() tea.Msg {
-			return execMsg{
-				cmd:  passstore.CopyCmd(e.Name),
-				then: fmt.Sprintf("%s is on the clipboard — pass will clear it by itself", e.Leaf),
-			}
-		}
+		return v, v.copyCmd(e)
 
 	case "enter", "f":
 		e, ok := v.current()
@@ -401,6 +409,47 @@ func (v *passView) updateConfirm(msg tea.KeyMsg) (view, tea.Cmd) {
 // The value never becomes a Go string on the way here: `pass show` writes into a pipe passstore
 // opens itself and the bytes land in locked memory. It becomes one only for the instant it is drawn,
 // which is unavoidable — a terminal takes strings.
+// copyCmd copies an entry, taking over the terminal ONLY when something might need it.
+//
+// Every copy used to go through tea.ExecProcess, which suspends the interface, hands the real
+// terminal to `pass`, waits, and takes it back. That is necessary exactly once — when the agent
+// has forgotten the passphrase and pinentry has to draw its prompt somewhere — and for every
+// other copy it is a visible flash of the shell underneath, on the most-used key in the tab.
+//
+// So the quiet path is tried first whenever the agent is holding the passphrase, and a failure
+// falls back to the interactive one rather than guessing why. The cache can expire between the
+// read that filled v.prot and this keypress; asking again with the terminal in hand is both the
+// correct answer to that and the only case the suspend was ever for.
+//
+// NOTHING IS PIPED. `pass show --clip` forks a sleeper that clears the clipboard 45 seconds
+// later, and that child inherits whatever stdout and stderr it is given. A pipe — which is what
+// a strings.Builder becomes here — would stay open in the sleeper, so cmd.Run would block for
+// the whole 45 seconds waiting for an EOF that had not come yet. /dev/null does not have that
+// problem, at the price of the error TEXT; the exit code is enough to decide to retry.
+func (v *passView) copyCmd(e passstore.Entry) tea.Cmd {
+	done := fmt.Sprintf("%s is on the clipboard — pass will clear it by itself", e.Leaf)
+	interactive := func() tea.Msg {
+		return execMsg{cmd: passstore.CopyCmd(e.Name), then: done}
+	}
+	// A prompt is possible only when the key HAS a passphrase and the agent is not holding it.
+	// Testing `Cached` alone got the unprotected store wrong: there is nothing to ask for there,
+	// yet every copy still suspended the interface to make room for a prompt that cannot happen.
+	// `Known` is false when the agent did not answer at all — then assume the worst and hand
+	// over the terminal, because a guess that costs a flash is better than one that loses a
+	// prompt.
+	if !v.prot.Known || (v.prot.Protected && !v.prot.Cached) {
+		return interactive
+	}
+	return func() tea.Msg {
+		cmd := passstore.CopyCmd(e.Name)
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
+		if err := cmd.Run(); err != nil {
+			return interactive()
+		}
+		return statusMsg{text: done}
+	}
+}
+
 func (v *passView) toggleReveal() (view, tea.Cmd) {
 	if v.rev.on {
 		v.rev.hide()
@@ -698,7 +747,7 @@ func (v *passView) Footer() string {
 	case smConfirm:
 		return joinHints(hint("y", "delete"), hint("other", "cancel"))
 	case smDetail:
-		return joinHints(revealHint(v.rev.on), hint("esc", "back"))
+		return joinHints(hint("c", "copy"), revealHint(v.rev.on), hint("esc", "back"))
 	}
 	// Every key that acts is named. [r] re-read the store from the day this tab was written and
 	// was never in the footer — the same drift the Generator's comment records for [x] and [a]:
