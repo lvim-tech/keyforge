@@ -1,7 +1,7 @@
 package sheet
 
 import (
-	"fmt"
+	"errors"
 	"sort"
 	"strings"
 )
@@ -107,6 +107,11 @@ func Compose(base string, m Mask) (paper, real string) {
 	return paper, real
 }
 
+// errReservedInSecret is why an existing password cannot go on a sheet. One value, so callers
+// can group refusals under it instead of repeating the same sentence per row.
+var errReservedInSecret = errors.New(
+	"they already contain a character the rule removes, so the sheet would reconstruct the wrong password")
+
 // ComposeExisting hides a password that ALREADY EXISTS, which is a weaker thing than
 // composing one, and the difference is worth stating rather than papering over.
 //
@@ -136,12 +141,15 @@ func Compose(base string, m Mask) (paper, real string) {
 // perfectly ordinary and be wrong — discovered at the one moment a paper backup is ever
 // used, which is the moment nothing else is left.
 func ComposeExisting(secret string, m Mask) (paper string, markersDropped bool, err error) {
+	// The offending CHARACTER is not named, and that is deliberate rather than terse. The
+	// reader can do nothing with it — the rule cannot be edited, and the remedy is the same
+	// either way — while a list of refusals that each names its character prints the noise set
+	// in a neat column for anyone looking at the screen. That is the one thing the interface
+	// spent the rest of its design not saying.
 	reserved := m.Reserved()
 	for _, r := range secret {
 		if strings.ContainsRune(reserved, r) {
-			return "", false, fmt.Errorf(
-				"it contains %q, which the rule treats as noise — the sheet would reconstruct the wrong password",
-				r)
+			return "", false, errReservedInSecret
 		}
 	}
 	body, applied := m.placeMarkers(secret)

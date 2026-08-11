@@ -572,7 +572,11 @@ func (v *printView) importFromStore() (view, tea.Cmd) {
 	}
 
 	added, dropped, again := 0, false, 0
-	var refused []string
+	// Grouped by REASON, so the sentence is said once and the entries are a list under it.
+	// Four refusals used to mean the same clause four times, wrapped across eight lines, with
+	// the store paths buried inside it.
+	refused := map[string][]string{}
+	var reasons []string
 	for _, e := range entries {
 		if have[e.Name] {
 			again++
@@ -600,7 +604,11 @@ func (v *printView) importFromStore() (view, tea.Cmd) {
 			// than a row that is missing: the missing one is noticed at once.
 			// e.Name, not e.Leaf: a store shaped websites/<site>/<login> has a dozen
 			// entries all called "user", and "left out — user" names none of them.
-			refused = append(refused, fmt.Sprintf("%s (%v)", e.Name, cerr))
+			why := cerr.Error()
+			if _, seen := refused[why]; !seen {
+				reasons = append(reasons, why)
+			}
+			refused[why] = append(refused[why], e.Name)
 			continue
 		}
 		dropped = dropped || md
@@ -620,8 +628,11 @@ func (v *printView) importFromStore() (view, tea.Cmd) {
 	if dropped {
 		notes = append(notes, "a marker had nothing to stand for in some of these — only the noise was used there")
 	}
-	if len(refused) > 0 {
-		notes = append(notes, "left out — "+strings.Join(refused, "; "))
+	for _, why := range reasons {
+		notes = append(notes, "left out — "+why+":")
+		for _, name := range refused[why] {
+			notes = append(notes, listMark+" "+name)
+		}
 	}
 	v.importNote = strings.Join(notes, "\n  ")
 	// "Already there" outranks "refused": on a second [i] every acceptable entry is a repeat,
@@ -629,8 +640,15 @@ func (v *printView) importFromStore() (view, tea.Cmd) {
 	if added == 0 && again > 0 {
 		return v, status("already on the sheet — nothing new in pass")
 	}
-	if added == 0 && len(refused) > 0 {
-		return v, failure("nothing could be put on the sheet: %s", strings.Join(refused, "; "))
+	if added == 0 && len(reasons) > 0 {
+		// The status line is one line by construction, so it counts rather than lists; the
+		// names are already under the sheet.
+		n := 0
+		for _, names := range refused {
+			n += len(names)
+		}
+		return v, failure("nothing could be put on the sheet — %d %s left out, see below",
+			n, plural(n, "entry", "entries"))
 	}
 	if again > 0 {
 		return v, status("imported %d; %d were already on the sheet", added, again)
@@ -833,11 +851,21 @@ func (v *printView) renderList(w, h int) string {
 	// to be drawn only while an imported row happened to be selected. So the one line saying
 	// where ten of twelve passwords went disappeared as soon as the cursor moved off them.
 	if v.importNote != "" {
-		// Folded to the terminal. The refusals name full store paths and there can be several,
-		// so the one line that says where the missing rows went ran off the right edge — which
-		// is the same as not printing it.
+		// Folded to the terminal, and the list items hang under their own bullet. A wrapped
+		// second line starting at the left margin reads as another item, which on a list of
+		// store paths is a store path that does not exist.
 		for _, line := range strings.Split(v.importNote, "\n") {
-			b.WriteString("\n" + indent(stWarn.Render(wrapText(strings.TrimSpace(line), maxi(w-4, 30))), 2))
+			line = strings.TrimSpace(line)
+			if name, ok := strings.CutPrefix(line, listMark+" "); ok {
+				wrapped := wrapText(name, maxi(w-10, 24))
+				parts := strings.Split(wrapped, "\n")
+				b.WriteString("\n    " + stDim.Render(listMark) + " " + stFg.Render(parts[0]))
+				for _, cont := range parts[1:] {
+					b.WriteString("\n      " + stFg.Render(cont))
+				}
+				continue
+			}
+			b.WriteString("\n" + indent(stWarn.Render(wrapText(line, maxi(w-4, 30))), 2))
 		}
 		b.WriteString("\n")
 	}

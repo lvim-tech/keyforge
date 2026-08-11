@@ -56,6 +56,10 @@ var (
 	stOK     = lipgloss.NewStyle().Bold(true).Foreground(cGreen).Padding(0, 1)
 )
 
+// listMark prefixes the items of a list written in prose, so a run of names reads as an
+// enumeration rather than as a sentence that happened to wrap.
+const listMark = "●"
+
 // pointer is the lvim-tech marker for the active row — the same glyph the editor's pickers use.
 const pointer = "➤"
 
