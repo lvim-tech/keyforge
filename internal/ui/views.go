@@ -101,12 +101,18 @@ func (v *auditView) Render(w, h int) string {
 				row = stRowSel
 			}
 			bg := row.GetBackground()
-			dot, dotStyle := "·", stDim.Background(bg)
+			// One glyph for all three severities, told apart by COLOUR alone. Info used to be a
+			// middle dot — a different, much smaller shape — so the informational rows read as
+			// a ragged second-class list rather than as the same list at a lower severity. The
+			// severity is the colour's job here; making it the size's job as well says the same
+			// thing twice and disagrees with itself at a glance.
+			dot := "●"
+			dotStyle := stDim.Background(bg)
 			switch sev {
 			case audit.High:
-				dot, dotStyle = "●", stBad.Background(bg)
+				dotStyle = stBad.Background(bg)
 			case audit.Warn:
-				dot, dotStyle = "●", stWarn.Background(bg)
+				dotStyle = stWarn.Background(bg)
 			}
 			line := dotStyle.Render(dot) + " " +
 				cell(trunc(f.Subject, 22), 22, row) + " " +
