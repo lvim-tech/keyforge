@@ -83,7 +83,14 @@ type Model struct {
 	// through the shell rather than each keeping their own, so there is one answer to "is the
 	// rule currently in this process" and one place that admits to it.
 	rules *ruleCache
+
+	// entered records when each tab was last re-read on being opened, so holding tab down does
+	// not spawn a process per keypress.
+	entered []time.Time
 }
+
+// enterReloadEvery throttles the re-read a tab gets when it is opened.
+const enterReloadEvery = 2 * time.Second
 
 // New builds the application with every tab this machine can support.
 func New(c config.Config) Model {
@@ -237,13 +244,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !m.viewCaptures() {
 				m.active = (m.active + 1) % len(m.views)
 				m.status = ""
-				return m, nil
+				return m, m.enterActive()
 			}
 		case "shift+tab", "h", "left":
 			if !m.viewCaptures() {
 				m.active = (m.active - 1 + len(m.views)) % len(m.views)
 				m.status = ""
-				return m, nil
+				return m, m.enterActive()
 			}
 		case "q":
 			if !m.viewCaptures() {
@@ -282,6 +289,32 @@ func (m *Model) afterLock() tea.Cmd {
 		m.rules.forget()
 	}
 	return m.broadcast(forgetMsg{})
+}
+
+// enterActive re-reads the world for the tab that has just been opened.
+//
+// Every tab used to load once, at startup, and then only when [r] was pressed. So a key created
+// in another terminal — the ordinary case while rotating keys, which is what this program is
+// for — did not appear on the Keys tab at all: switching away and back showed the same stale
+// list, and only a restart fixed it. A screen that quietly describes a machine that no longer
+// exists is worse than an empty one.
+//
+// The read is a command, so it happens off the draw path and the old data stays on screen until
+// the new arrives. The throttle is for the case of tabbing THROUGH a tab on the way to another:
+// the Keys tab spawns a ssh-keygen per key and the GPG tab spawns gpg, and neither is worth
+// doing twice in the same second.
+func (m *Model) enterActive() tea.Cmd {
+	if len(m.entered) != len(m.views) {
+		m.entered = make([]time.Time, len(m.views))
+	}
+	now := time.Now()
+	if last := m.entered[m.active]; !last.IsZero() && now.Sub(last) < enterReloadEvery {
+		return nil
+	}
+	m.entered[m.active] = now
+	nv, cmd := m.views[m.active].Update(reloadMsg{})
+	m.views[m.active] = nv
+	return cmd
 }
 
 // broadcast delivers a message to every view and batches whatever they ask for in return.
@@ -451,12 +484,40 @@ func (m Model) View() string {
 	// The footer is built first, because how many rows it wants decides what is left for the
 	// body. Assuming one line and then drawing three is how a list loses its last entries off
 	// the bottom of the screen.
+	//
+	// The composition below is head + blank + body + status + footer, so it costs
+	// 3 + bodyH + footLines rows — the status line takes one even when it is empty.
 	footLines := strings.Count(foot, "\n") + 1
-	bodyH := m.h - 4 - footLines
-	if bodyH < 3 {
-		bodyH = 3
-	}
-	body := m.views[m.active].Render(m.w, bodyH)
 
-	return head + "\n\n" + body + "\n" + st + "\n" + foot
+	// On a window too short for even the chrome, the FOOTER gives way before the header does.
+	// Both matter and neither is decoration: the header says which tab you are on, the footer
+	// says how to leave it. But a header is one row and a footer can be four, so cutting the
+	// footer buys the room while cutting the header buys almost none.
+	if room := m.h - 3; room < footLines {
+		foot = clampLines(foot, room)
+		footLines = strings.Count(foot, "\n") + 1
+		if room <= 0 {
+			foot, footLines = "", 0
+		}
+	}
+
+	// No floor. This used to read `if bodyH < 3 { bodyH = 3 }`, which is the one place the
+	// frame could still come out taller than the terminal: below seven-or-so rows it handed the
+	// body three rows that did not exist, the terminal scrolled, and under the alternate screen
+	// the row lost off the TOP is the tab strip. The intent was right — a body collapsing to
+	// nothing is useless — but rows cannot be conjured. On a window that small the body is
+	// exactly what should shrink.
+	bodyH := maxi(m.h-3-footLines, 0)
+
+	// CUT TO THE BUDGET, unconditionally. The views are given the height and are expected to
+	// fit inside it, but a view that draws one line too many pushes the whole composition down
+	// and the terminal scrolls.
+	body := clampLines(m.views[m.active].Render(m.w, bodyH), bodyH)
+
+	frame := head + "\n\n" + body + "\n" + st + "\n" + foot
+
+	// The invariant, checked at the one place it can be rather than argued about in five. Every
+	// part above has already been sized to fit, so this is a backstop; cutting from the bottom
+	// is what keeps the header when it ever fires.
+	return clampLines(frame, m.h)
 }
