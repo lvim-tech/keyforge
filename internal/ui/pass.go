@@ -532,6 +532,62 @@ func (v *passView) renderMaster() string {
 	return fmt.Sprintf("  %s %s   %s\n", stDim.Render("store →"), stFg.Render(rec), state)
 }
 
+// treeHeight is how many ROWS the entries in [s,e) occupy once their folder headers are drawn.
+func (v *passView) treeHeight(s, e int) int {
+	n, prev := 0, "\x00"
+	for i := s; i < e && i < len(v.shown); i++ {
+		if v.shown[i].Folder != prev {
+			prev = v.shown[i].Folder
+			n++
+		}
+		n++
+	}
+	return n
+}
+
+// treeWindow picks the widest range around the cursor whose rendered height fits in room.
+//
+// It grows one entry at a time, downward and then upward, so the cursor ends up roughly in the
+// middle rather than pinned to an edge — and it asks treeHeight rather than assuming one row per
+// entry, which is the whole point: the rows the folder headers take are rows the entries cannot.
+func (v *passView) treeWindow(room int) (int, int) {
+	if len(v.shown) == 0 || room < 1 {
+		return 0, 0
+	}
+	sel := v.sel
+	if sel >= len(v.shown) {
+		sel = len(v.shown) - 1
+	}
+	start, end := sel, sel+1
+	for {
+		grew := false
+		if end < len(v.shown) && v.treeHeight(start, end+1)+v.markers(start, end+1) <= room {
+			end++
+			grew = true
+		}
+		if start > 0 && v.treeHeight(start-1, end)+v.markers(start-1, end) <= room {
+			start--
+			grew = true
+		}
+		if !grew {
+			return start, end
+		}
+	}
+}
+
+// markers counts the "… N above" / "… N below" lines the window will need, which take rows of
+// their own and so belong in the budget rather than beside it.
+func (v *passView) markers(start, end int) int {
+	n := 0
+	if start > 0 {
+		n++
+	}
+	if end < len(v.shown) {
+		n++
+	}
+	return n
+}
+
 func (v *passView) renderList(w, h int) string {
 	if !v.loaded {
 		return stDim.Render("  reading the store…")
@@ -560,9 +616,13 @@ func (v *passView) renderList(w, h int) string {
 	// Folders are headers rather than rows: they are not things you can copy or delete, and making
 	// them selectable would mean every other keypress landing on something that cannot do anything.
 	lastFolder := "\x00"
-	// Windowed like every other list here: the shell cuts the body to its budget so the footer
-	// survives, which means a list longer than the screen has to keep its own cursor in view.
-	start, end := window(len(v.shown), v.sel, maxi(h-6, 1))
+	// Windowed on RENDERED HEIGHT, not on the number of entries.
+	//
+	// This tree draws a header line for every folder it enters, so a window of eighteen entries
+	// is eighteen rows plus however many folders fall inside it — and the shell, which cuts the
+	// body to the height it budgeted, took the difference off the bottom. The last rows were
+	// drawn and then chopped, so the cursor could walk onto entries that were not on screen.
+	start, end := v.treeWindow(maxi(h-7, 1))
 	if start > 0 {
 		b.WriteString(stDim.Render(fmt.Sprintf("     … %d above", start)) + "\n")
 	}
