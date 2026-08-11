@@ -700,10 +700,14 @@ func (v *passView) Footer() string {
 	case smDetail:
 		return joinHints(revealHint(v.rev.on), hint("esc", "back"))
 	}
+	// Every key that acts is named. [r] re-read the store from the day this tab was written and
+	// was never in the footer — the same drift the Generator's comment records for [x] and [a]:
+	// the capability was on screen, the way to reach it was not.
 	return joinHints(
+		hint("j/k", "move"), hint("g/G", "top/bottom"),
 		hint("a", "new"), hint("e", "change"), hint("c", "copy"), revealHint(v.rev.on),
-		hint("m", "move"), hint("d", "delete"), hint("/", "filter"),
-		hint("enter", "details"), hint("p", "master password"),
+		hint("m", "move"), hint("d", "delete"), hint("/", "filter"), hint("r", "reload"),
+		hint("enter/f", "details"), hint("p", "master password"),
 	)
 }
 

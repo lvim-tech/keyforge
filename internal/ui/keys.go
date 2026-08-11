@@ -504,9 +504,10 @@ func (v *keysView) Footer() string {
 		return joinHints(hint("esc", "back"))
 	}
 	f := joinHints(
+		hint("j/k", "move"), hint("g/G", "top/bottom"),
 		hint("n", "new"), hint("p", "passphrase"), hint("c", "copy"),
 		hint("d", "deploy"), hint("r", "revoke"), hint("a", "remote"),
-		hint("enter", "details"),
+		hint("enter/f", "details"),
 	)
 	if passstore.Available() {
 		// Clamped, not sliced. `[:8]` panicked the whole TUI on the first render of this tab

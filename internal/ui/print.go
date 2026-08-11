@@ -979,13 +979,18 @@ func (v *printView) Footer() string {
 		return joinHints(hint("enter", "confirm"), hint("esc", "cancel"))
 	}
 	f := []string{
+		hint("j/k", "move"),
 		hint("n", "new"), hint("i", "from pass"), hint("space", "tick"), hint("g", "regen"),
 	}
 	// Offered only while there is no rule, and gone entirely once there is one — the same
 	// disappearance the audit line makes. A footer that keeps saying "rule" is the program
 	// telling every reader of the screen that a masking scheme is in use here.
+	//
+	// [w] used to be listed beside it and is NOT any more, because the key itself is gone: the
+	// form stores on [enter] now. A footer naming a key that does nothing is worse than one
+	// that names nothing — it sends the reader to press it and then to wonder what they broke.
 	if !v.rules.configured() {
-		f = append(f, hint("m", "rule"), hint("w", "store"))
+		f = append(f, hint("m", "rule"))
 	}
 	f = append(f, revealHint(v.rev.on), hint("x", "export"), hint("d", "remove"))
 	if passstore.Available() {
