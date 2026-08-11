@@ -42,13 +42,17 @@ Revocation is the half of a rotation that usually gets skipped. A new key by its
 the old public key keeps opening every machine it was ever installed on, and will go on doing so for
 years unless somebody removes it.
 
-**Generator** — word phrases (a built-in list of 13 977 words, 13.8 bits per word) and random
-strings. All from `crypto/rand`. It shows the entropy and how long cracking would take, **with the
+**Generator** — word phrases (from a built-in list; the tab reports the entropy it actually drew
+from) and random strings. All from `crypto/rand`. It shows the entropy and how long cracking would take, **with the
 assumption stated** — a number without its assumption is advertising, not an estimate. It writes
 straight into `pass`.
 
 A word phrase is the better choice for a key passphrase: it is long, it is memorable, and once it is
 on screen a wrong keyboard layout is obvious at a glance — unlike a string behind asterisks.
+
+When a sheet rule is set up, everything generated here is composed under it: the reserved characters
+are never produced, and the piece you remember is inside the value. That is what keeps the printed
+page from being enough on its own, so it has to happen where passwords are actually made.
 
 **Passwords** — the `pass` store as a tree, and the operations a store actually needs: add an
 existing password, generate one straight into a folder, copy, change, move, delete, filter.
@@ -126,11 +130,13 @@ encrypted to — gpg asks through pinentry, keyforge never sees the passphrase, 
 password to remember and no hash of one on disk.
 
 ```json
-"lock": { "idle_minutes": 10, "clear_agent": true, "key": "ctrl+x" }
+"lock": { "idle_minutes": 10, "clear_agent": true, "at_start": false, "key": "ctrl+x" }
 ```
 
 `idle_minutes` locks after that much quiet; `0`, the default, means the lock only happens when you
-ask for it. `key` is that ask — `""` removes it and leaves only the timer.
+ask for it. `key` is that ask — `""` removes it and leaves only the timer. `at_start` opens keyforge
+already covered, and what that is worth depends entirely on `clear_agent`: with the passphrase still
+cached the curtain lifts without asking anything, so it would only be pretending.
 
 The key is configurable because a terminal is already full of bindings that belong to something
 else: `ctrl+l` is the obvious choice and is a tmux window binding on many setups, and a redraw
@@ -191,26 +197,67 @@ was never written down anywhere, and no amount of study reconstructs it.
 The length is compensated: the value is generated as many characters shorter as will be inserted, so
 the sheet ends up showing the round number you asked for.
 
-## What is remembered, and what never is
+**Where the rule lives.** Not in the config. The whole of it — the noise characters, how many are
+scattered, the markers and what each one stands for — is encrypted into a `pass` entry, and the
+config keeps only that entry's name:
 
-| written to `~/.config/keyforge/config.json` | written nowhere |
-|---|---|
-| which characters are stripped | **what stands behind the marker** |
-| how many are inserted | **any password at all** |
-| which characters are markers | |
-| when to lock, and whether to clear the agent | |
-
-The structure can also be built into the binary, if you would rather not have a config file at all:
-
-```sh
-P=github.com/lvim-tech/keyforge/internal/config
-go build -ldflags "-X $P.buildStrip=q7 -X $P.buildStripCount=2 -X $P.buildMarkers=z" -o keyforge .
+```json
+"sheet": { "rule_from": "f644307786", "cache_minutes": 60 }
 ```
 
-**The value, however, is never built in.** A string handed to the compiler sits in the binary in
+The name is random hex, generated once, and says nothing about what is inside; in a listing it is
+one more entry among the others. This is a change from how it used to work, and the reason is
+worth stating: keeping the STRUCTURE in the config while withholding only the values was defended
+on the grounds that structure alone does not open a password. That holds right up until the paper
+is in somebody's hands — and then "delete every q and 7" IS the key to reading it. The page is the
+one part of this system designed to leave the machine, so the machine must not also hold its
+legend.
+
+Reading it needs the store's passphrase, so it is read on demand — never at startup, so opening
+keyforge to look at an SSH audit does not raise a prompt — and held for `cache_minutes`
+afterwards. **While it is held, the screen says so in red** and `ctrl+f` ends it early. That
+admission is not decoration: gpg-agent's cache is the agent's business and keyforge only reports
+it, but this one is keyforge's own doing, and a program that quietly held a decrypted secret for
+an hour while showing nothing would be doing the very thing it exists to expose.
+
+**The rule cannot be edited.** Once it is set, `[m]` disappears — changing it would invalidate
+every sheet already printed under the old one, and a key labelled "rule" on a machine that has one
+announces the scheme to anyone reading over a shoulder. It is offered exactly once, before the
+first password, and after that nothing in the interface mentions it.
+
+## What is remembered, and what never is
+
+| in `~/.config/keyforge/config.json` | encrypted in `pass` | written nowhere |
+|---|---|---|
+| the NAME of the rule entry | which characters are noise | **what stands behind the marker** |
+| how long the rule may be held | how many are scattered | **any password at all** |
+| when to lock, whether to clear the agent | which characters are markers | |
+| password length, words, separator | | |
+
+**The value is never built into the binary either.** A string handed to the compiler sits there in
 plain text and `strings` finds it with one command — and Go records the whole flag line too, so how
-it was passed is visible as well. Encrypting does not help: the key has to be in there too. A program
-that knows the value without asking you **contains** the value.
+it was passed is visible as well. Encrypting does not help: the key has to be in there too. A
+program that knows the value without asking you **contains** the value. (Earlier versions offered
+`-ldflags -X …` for the structure; those flags are gone, and with them the temptation.)
+
+## Settings
+
+The seventh tab, for the settings that have nowhere else to live: persistent, invisible, and not
+adjustable where their effect can be seen. Password length is none of those — it is `+`/`-` in the
+Generator while the result changes in front of you — so it is not there.
+
+| | |
+|---|---|
+| `lock on opening` | keyforge opens covered (`lock.at_start`) |
+| `lock after idle` | minutes, `0` for never |
+| `locking clears the agent` | what turns the curtain into a lock — see below |
+| `lock key` | claimed by the shell before any tab sees it |
+| `agent forgets after idle` | `default-cache-ttl`, restarts on every use |
+| `agent forgets regardless` | `max-cache-ttl`, the ceiling from when you typed it |
+| `keyforge keeps the sheet rule` | `sheet.cache_minutes` — keyforge's own memory, not the agent's |
+
+Each row says what it costs, and the agent's real state is shown above them: a number without what
+it is currently doing is half the information.
 
 ## Process hardening
 
