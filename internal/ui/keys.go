@@ -359,7 +359,15 @@ func (v *keysView) renderList(w, h int) string {
 	head := fmt.Sprintf("  %-20s %-12s %-10s %-8s %s", "key", "type", "passphrase", "format", "opens")
 	b.WriteString(stDim.Render(head) + "\n")
 
-	for i, k := range v.keys {
+	// The rows are windowed to what the terminal can actually show. The shell cuts the body to
+	// the height it budgeted — otherwise the footer is pushed off the bottom — so a list longer
+	// than the screen would lose its tail silently, cursor and all.
+	start, end := window(len(v.keys), v.sel, maxi(h-4, 1))
+	if start > 0 {
+		b.WriteString(stDim.Render(fmt.Sprintf("     … %d above", start)) + "\n")
+	}
+	for i, k := range v.keys[start:end] {
+		i += start
 		mark := "  "
 		row := stRow
 		if i == v.sel {
@@ -403,6 +411,9 @@ func (v *keysView) renderList(w, h int) string {
 			cell(k.Format, 8, formatStyle.Background(row.GetBackground())) + " " +
 			cell(hosts, maxi(w-56, 10), hostStyle.Background(row.GetBackground()))
 		b.WriteString(mark + line + "\n")
+	}
+	if end < len(v.keys) {
+		b.WriteString(stDim.Render(fmt.Sprintf("     … %d below", len(v.keys)-end)) + "\n")
 	}
 
 	if k, ok := v.current(); ok {

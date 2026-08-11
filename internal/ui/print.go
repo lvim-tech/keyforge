@@ -825,7 +825,12 @@ func (v *printView) renderList(w, h int) string {
 	// row twice as far as the reader is concerned.
 	labelW, paperW := v.columns(w)
 	b.WriteString(stDim.Render(fmt.Sprintf("     %-*s %-*s %s", labelW, "label", paperW, "on the sheet", "the password")) + "\n")
-	for i, r := range v.rows {
+	start, end := window(len(v.rows), v.sel, maxi(h-10, 1))
+	if start > 0 {
+		b.WriteString(stDim.Render(fmt.Sprintf("     … %d above", start)) + "\n")
+	}
+	for i, r := range v.rows[start:end] {
+		i += start
 		mark := "  "
 		st := stRow
 		if i == v.sel {
@@ -845,6 +850,10 @@ func (v *printView) renderList(w, h int) string {
 			cell(tail(r.label, labelW), labelW, st) + " " +
 			cell(r.paper, paperW, stFg.Background(bg)) + " " +
 			cell(real, maxi(w-labelW-paperW-8, 8), stAccent.Background(bg)) + "\n")
+	}
+
+	if end < len(v.rows) {
+		b.WriteString(stDim.Render(fmt.Sprintf("     … %d below", len(v.rows)-end)) + "\n")
 	}
 
 	// The import note belongs to the LAST IMPORT, not to the row under the cursor, and it used

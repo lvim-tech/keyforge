@@ -81,10 +81,21 @@ func (v *auditView) Render(w, h int) string {
 
 	// Show the worst first: a screen that opens on "info" teaches you to scroll past it.
 	order := []audit.Severity{audit.High, audit.Warn, audit.Info}
+	// Windowed on the FLAT index, the same one the cursor moves along, so the band follows the
+	// selection across the three severity passes rather than per pass. The selected row draws a
+	// second line for its action, hence the extra row of slack.
+	start, end := window(len(v.rep.Findings), v.sel, maxi(h-5, 1))
+	if start > 0 {
+		b.WriteString(stDim.Render(fmt.Sprintf("     … %d above", start)) + "\n")
+	}
 	idx := 0
 	for _, sev := range order {
 		for _, f := range v.rep.Findings {
 			if f.Severity != sev {
+				continue
+			}
+			if idx < start || idx >= end {
+				idx++
 				continue
 			}
 			mark := "  "
@@ -123,6 +134,9 @@ func (v *auditView) Render(w, h int) string {
 			}
 			idx++
 		}
+	}
+	if end < len(v.rep.Findings) {
+		b.WriteString(stDim.Render(fmt.Sprintf("     … %d below", len(v.rep.Findings)-end)) + "\n")
 	}
 	return b.String()
 }
@@ -198,7 +212,12 @@ func (v *gpgView) Render(w, h int) string {
 	}
 	var b strings.Builder
 	b.WriteString(stDim.Render(fmt.Sprintf("  %-18s %-12s %-12s %s", "key", "type", "expires", "identity")) + "\n")
-	for i, k := range v.keys {
+	gstart, gend := window(len(v.keys), v.sel, maxi(h-3, 1))
+	if gstart > 0 {
+		b.WriteString(stDim.Render(fmt.Sprintf("     … %d above", gstart)) + "\n")
+	}
+	for i, k := range v.keys[gstart:gend] {
+		i += gstart
 		mark := "  "
 		row := stRow
 		if i == v.sel {
@@ -233,6 +252,9 @@ func (v *gpgView) Render(w, h int) string {
 			cell(k.Type, 12, stFg.Background(bg)) + " " +
 			cell(expText, 12, expStyle.Background(bg)) + " " +
 			cell(uid, maxi(w-48, 10), row) + "\n")
+	}
+	if gend < len(v.keys) {
+		b.WriteString(stDim.Render(fmt.Sprintf("     … %d below", len(v.keys)-gend)) + "\n")
 	}
 	b.WriteString("\n" + stDim.Render("  An expiring GPG key stops `pass` and signed commits without warning.\n"+
 		"  Extend it without replacing the key:  gpg --quick-set-expire <fpr> 2y"))
@@ -311,7 +333,12 @@ func (v *certView) Render(w, h int) string {
 	}
 	var b strings.Builder
 	b.WriteString(stDim.Render(fmt.Sprintf("  %-32s %-24s %s", "subject", "validity", "file")) + "\n")
-	for i, c := range v.list {
+	cstart, cend := window(len(v.list), v.sel, maxi(h-3, 1))
+	if cstart > 0 {
+		b.WriteString(stDim.Render(fmt.Sprintf("     … %d above", cstart)) + "\n")
+	}
+	for i, c := range v.list[cstart:cend] {
+		i += cstart
 		mark := "  "
 		row := stRow
 		if i == v.sel {

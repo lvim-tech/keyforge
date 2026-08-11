@@ -536,7 +536,14 @@ func (v *passView) renderList(w, h int) string {
 	// Folders are headers rather than rows: they are not things you can copy or delete, and making
 	// them selectable would mean every other keypress landing on something that cannot do anything.
 	lastFolder := "\x00"
-	for i, e := range v.shown {
+	// Windowed like every other list here: the shell cuts the body to its budget so the footer
+	// survives, which means a list longer than the screen has to keep its own cursor in view.
+	start, end := window(len(v.shown), v.sel, maxi(h-6, 1))
+	if start > 0 {
+		b.WriteString(stDim.Render(fmt.Sprintf("     … %d above", start)) + "\n")
+	}
+	for i, e := range v.shown[start:end] {
+		i += start
 		if e.Folder != lastFolder {
 			lastFolder = e.Folder
 			label := e.Folder
@@ -561,6 +568,10 @@ func (v *passView) renderList(w, h int) string {
 	// for 30s", and drew nothing: revealedLine was called only by the detail pane. A password
 	// held in locked memory for half a minute, announced, and never shown is the worst trade
 	// of the three — all of the exposure and none of the use.
+	if end < len(v.shown) {
+		b.WriteString(stDim.Render(fmt.Sprintf("     … %d below", len(v.shown)-end)) + "\n")
+	}
+
 	if v.rev.on && v.revealed != nil {
 		b.WriteString("\n" + v.revealedLine(maxi(w-20, 24)) + "\n")
 	}

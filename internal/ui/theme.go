@@ -96,6 +96,40 @@ func cell(s string, w int, st lipgloss.Style) string {
 //
 // The same rule as `cell` below and for the same reason: style the text, lay out around it.
 
+// clampLines cuts a rendered block to at most n lines.
+func clampLines(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) <= n {
+		return s
+	}
+	return strings.Join(lines[:n], "\n")
+}
+
+// window returns the half-open range of rows to draw so that `sel` stays on screen.
+//
+// The cursor is kept inside the visible band rather than centred: a list that recentres on every
+// keypress moves under the eye, and the row you were reading is somewhere else by the time you
+// look back at it.
+func window(total, sel, room int) (start, end int) {
+	if room <= 0 || total <= 0 {
+		return 0, 0
+	}
+	if total <= room {
+		return 0, total
+	}
+	start = sel - room/2
+	if start < 0 {
+		start = 0
+	}
+	if start > total-room {
+		start = total - room
+	}
+	return start, start + room
+}
+
 // tail keeps the END of a string when it will not fit.
 //
 // The opposite of trunc, and the right choice for a store path: `websites/abv.bg/` is the part
