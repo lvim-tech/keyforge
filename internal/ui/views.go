@@ -3,6 +3,7 @@ package ui
 import (
 	"errors"
 	"fmt"
+	"github.com/charmbracelet/lipgloss"
 	"strings"
 	"time"
 
@@ -125,12 +126,28 @@ func (v *auditView) Render(w, h int) string {
 			case audit.Warn:
 				dotStyle = stWarn.Background(bg)
 			}
+			msgW := maxi(w-32, 8)
 			line := dotStyle.Render(dot) + " " +
 				cell(trunc(f.Subject, 22), 22, row) + " " +
-				cell(f.Message, maxi(w-32, 8), row)
+				cell(f.Message, msgW, row)
 			b.WriteString(mark + line + "\n")
 			if idx == v.sel {
-				b.WriteString("     " + stNote.Render("→ "+f.Action) + "\n")
+				// The row is one line so the list stays scannable, and the row under the
+				// cursor says all of itself underneath. Truncation is fine for reading down a
+				// column; it is not fine for the one finding you stopped on, where the part
+				// that got cut is usually the part that tells you what to do.
+				if len([]rune(f.Message)) > msgW {
+					b.WriteString(indent(stFg.Render(wrapText(f.Message, maxi(w-6, 24))), 5) + "\n")
+				}
+				// Only when there is one. A finding that reports the state is fine is built
+				// with an empty Action on purpose — there is nothing to do about good news —
+				// and drawing the arrow regardless left a bare "→" pointing at nothing, which
+				// reads as a message that failed to load rather than as an absence of one.
+				if f.Action != "" {
+					for _, l := range hanging("→ ", f.Action, maxi(w-6, 24)) {
+						b.WriteString(indent(stNote.Render(l), 5) + "\n")
+					}
+				}
 			}
 			idx++
 		}
@@ -256,6 +273,21 @@ func (v *gpgView) Render(w, h int) string {
 	if gend < len(v.keys) {
 		b.WriteString(stDim.Render(fmt.Sprintf("     … %d below", len(v.keys)-gend)) + "\n")
 	}
+	// Every identity on the selected key, whole. The column holds one and cuts it; a key with
+	// three uids is a key whose column says nothing useful about which one it is.
+	if v.sel < len(v.keys) {
+		k := v.keys[v.sel]
+		b.WriteString("\n")
+		for _, uid := range k.UIDs {
+			for _, l := range hanging("· ", uid, maxi(w-6, 24)) {
+				b.WriteString(indent(stDim.Render(l), 2) + "\n")
+			}
+		}
+		if !k.SubkeyExpires.IsZero() {
+			b.WriteString(indent(stDim.Render("encryption subkey expires "+
+				k.SubkeyExpires.Format("2006-01-02")), 2) + "\n")
+		}
+	}
 	b.WriteString("\n" + stDim.Render("  An expiring GPG key stops `pass` and signed commits without warning.\n"+
 		"  Extend it without replacing the key:  gpg --quick-set-expire <fpr> 2y"))
 	return b.String()
@@ -361,15 +393,33 @@ func (v *certView) Render(w, h int) string {
 			cell(c.Summary(), 24, st.Background(bg)) + " " +
 			cell(c.Path, maxi(w-62, 12), stDim.Background(bg)) + "\n")
 	}
+	// The detail of the selected certificate, folded rather than run off the edge. Issuer
+	// strings and SAN lists are routinely longer than a terminal, and the path — the answer to
+	// "which of these two identically named certificates is it" — is the first thing the column
+	// cuts.
 	if v.sel < len(v.list) {
 		c := v.list[v.sel]
-		b.WriteString("\n" + stDim.Render("  issuer:  ") + stFg.Render(c.Issuer))
+		room := maxi(w-13, 24)
+		field := func(label, value string, st lipgloss.Style) {
+			if value == "" {
+				return
+			}
+			for i, l := range strings.Split(wrapText(value, room), "\n") {
+				if i == 0 {
+					b.WriteString("\n" + stDim.Render(fmt.Sprintf("  %-9s", label)) + st.Render(l))
+					continue
+				}
+				b.WriteString("\n" + strings.Repeat(" ", 11) + st.Render(l))
+			}
+		}
+		b.WriteString("\n")
+		field("file:", c.Path, stFg)
+		issuer := c.Issuer
 		if c.SelfSign {
-			b.WriteString(stDim.Render("  (self-signed)"))
+			issuer += "  (self-signed)"
 		}
-		if len(c.DNS) > 0 {
-			b.WriteString("\n" + stDim.Render("  names:   ") + stFg.Render(strings.Join(c.DNS, ", ")))
-		}
+		field("issuer:", issuer, stFg)
+		field("names:", strings.Join(c.DNS, ", "), stFg)
 		b.WriteString("\n")
 	}
 	return b.String()

@@ -419,11 +419,20 @@ func (v *keysView) renderList(w, h int) string {
 	if k, ok := v.current(); ok {
 		b.WriteString("\n")
 		sha, _ := sshkeys.Fingerprints(k)
-		b.WriteString(stDim.Render("  " + sha))
-		if k.Comment != "" {
-			b.WriteString(stDim.Render("  ·  " + k.Comment))
+		for i, l := range strings.Split(wrapText(sha, maxi(w-4, 24)), "\n") {
+			b.WriteString(stDim.Render("  "+l) + "\n")
+			_ = i
 		}
-		b.WriteString("\n")
+		if k.Comment != "" {
+			b.WriteString(indent(stDim.Render(wrapText(k.Comment, maxi(w-4, 24))), 2) + "\n")
+		}
+		// The hosts this key opens, whole. The column holds one line and cuts it, and a key
+		// that opens four aliases is exactly the key whose column tells you the least.
+		if len(k.Hosts) > 0 {
+			for _, l := range hanging("opens: ", strings.Join(k.Hosts, ", "), maxi(w-4, 24)) {
+				b.WriteString(indent(stDim.Render(l), 2) + "\n")
+			}
+		}
 	}
 	return b.String()
 }

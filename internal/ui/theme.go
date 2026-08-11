@@ -130,6 +130,26 @@ func window(total, sel, room int) (start, end int) {
 	return start, start + room
 }
 
+// hanging renders `prefix + text` folded to width, with the continuation aligned under the TEXT
+// rather than under the prefix.
+//
+// A wrapped second line starting back at the marker reads as a second item, which on a list of
+// store paths is a path that does not exist. Returned as lines so the caller decides the
+// indentation and the styling — the layout is done around the text, never inside a Render.
+func hanging(prefix, text string, width int) []string {
+	pad := strings.Repeat(" ", len([]rune(prefix)))
+	body := wrapText(text, maxi(width-len([]rune(prefix)), 12))
+	var out []string
+	for i, l := range strings.Split(body, "\n") {
+		if i == 0 {
+			out = append(out, prefix+l)
+			continue
+		}
+		out = append(out, pad+l)
+	}
+	return out
+}
+
 // tail keeps the END of a string when it will not fit.
 //
 // The opposite of trunc, and the right choice for a store path: `websites/abv.bg/` is the part

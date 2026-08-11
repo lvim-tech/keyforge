@@ -340,22 +340,45 @@ func mins(n int) string {
 	return short(time.Duration(n) * time.Minute)
 }
 
-// wrapText folds a note to the width, at character boundaries.
+// wrapText folds text to the width, at word boundaries — and inside a word when the word alone
+// is wider than the line.
+//
+// The second half is not a nicety. A store path, a fingerprint and a password are all ONE word
+// by this function's reckoning, so without it they came back unfolded and were then broken by
+// whatever drew them — the box, the terminal — at a place nothing had chosen, with the
+// remainder starting hard against the left edge instead of under its own column. Folding a long
+// word here means the caller can indent the continuation, because the caller is the one that
+// knows where the column is.
 func wrapText(s string, width int) string {
+	if width < 1 {
+		width = 1
+	}
 	var out []string
 	cur := ""
-	for _, word := range strings.Fields(s) {
-		if cur != "" && len([]rune(cur))+1+len([]rune(word)) > width {
+	flush := func() {
+		if cur != "" {
 			out = append(out, cur)
 			cur = ""
+		}
+	}
+	for _, word := range strings.Fields(s) {
+		if len([]rune(word)) > width {
+			flush()
+			for r := []rune(word); len(r) > 0; {
+				n := mini(width, len(r))
+				out = append(out, string(r[:n]))
+				r = r[n:]
+			}
+			continue
+		}
+		if cur != "" && len([]rune(cur))+1+len([]rune(word)) > width {
+			flush()
 		}
 		if cur != "" {
 			cur += " "
 		}
 		cur += word
 	}
-	if cur != "" {
-		out = append(out, cur)
-	}
+	flush()
 	return strings.Join(out, "\n")
 }

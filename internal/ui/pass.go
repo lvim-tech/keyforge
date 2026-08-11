@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/lvim-tech/keyforge/internal/config"
 	"github.com/lvim-tech/keyforge/internal/gpgkeys"
@@ -425,10 +426,19 @@ func (v *passView) revealedLine(room int) string {
 	if !v.rev.on || v.revealed == nil {
 		return stDim.Render("  password     ") + stDim.Render("•••••••• ") + stKey.Render("[v]") + stDim.Render(" shows it")
 	}
+	// Folded, not cut. A password shown as "hunter2-corr…" is a password you cannot read, and
+	// reading it is the entire reason [v] exists.
 	shown := ""
-	v.revealed.Use(func(s string) { shown = trunc(s, room) })
-	return stDim.Render("  password     ") + stFg.Render(shown) +
-		stWarn.Render("   on screen — [v] hides it")
+	v.revealed.Use(func(s string) { shown = wrapText(s, room) })
+	out := ""
+	for i, l := range strings.Split(shown, "\n") {
+		if i == 0 {
+			out = stDim.Render("  password     ") + stFg.Render(l)
+			continue
+		}
+		out += "\n" + strings.Repeat(" ", 15) + stFg.Render(l)
+	}
+	return out + stWarn.Render("   on screen — [v] hides it")
 }
 
 // renderDetail shows what is known about an entry without showing the entry.
@@ -438,33 +448,47 @@ func (v *passView) revealedLine(room int) string {
 // can leak it by accident.
 func (v *passView) renderDetail(w int) string {
 	e := v.detailEntry
-	// Every value is cut to the box, because a store path is easily longer than the terminal and a
-	// wrapped line walks straight through the right border.
+	// Values are FOLDED, not cut. The old reasoning was that a store path is easily longer than
+	// the terminal and a wrapped line walks through the right border — true of a line that
+	// wraps by accident, at the terminal's width, and not of one folded to the box's own width
+	// with its continuation aligned under the column. Cutting made the box tidy and the answer
+	// unreadable: a path ending in "…" does not say which entry you are looking at, which is
+	// the only question this pane exists to answer.
 	room := maxi(w-20, 24)
 	var b strings.Builder
-	row := func(label, val string) {
-		if val != "" {
-			fmt.Fprintf(&b, "  %s %s\n", stDim.Render(fmt.Sprintf("%-12s", label)), val)
+	row := func(label, val string, st lipgloss.Style) {
+		if val == "" {
+			return
+		}
+		for i, l := range strings.Split(wrapText(val, room), "\n") {
+			if i == 0 {
+				fmt.Fprintf(&b, "  %s %s\n", stDim.Render(fmt.Sprintf("%-12s", label)), st.Render(l))
+				continue
+			}
+			// Plain spaces, not a styled blank: the padding carries no meaning and a
+			// whitespace-only Render is the sort of thing a layout engine feels free to trim.
+			fmt.Fprintf(&b, "%s%s\n", strings.Repeat(" ", 15), st.Render(l))
 		}
 	}
-	row("path", stFg.Render(trunc(e.Name, room)))
-	row("folder", trunc(e.Folder, room))
-	row("file", stDim.Render(trunc(passstore.Dir()+"/"+e.Name+".gpg", room)))
-	row("modified", e.Modified.Format("2006-01-02 15:04")+
+	row("path", e.Name, stFg)
+	row("folder", e.Folder, stDim)
+	row("file", passstore.Dir()+"/"+e.Name+".gpg", stDim)
+	fmt.Fprintf(&b, "  %s %s%s\n", stDim.Render(fmt.Sprintf("%-12s", "modified")),
+		e.Modified.Format("2006-01-02 15:04"),
 		stDim.Render(fmt.Sprintf("  (%d days ago)", int(time.Since(e.Modified).Hours()/24))))
 
 	b.WriteString(v.revealedLine(room) + "\n")
 
 	switch {
 	case v.detailErr != "":
-		b.WriteString("\n" + stWarn.Render("  the fields cannot be read: "+trunc(v.detailErr, room)) + "\n")
+		b.WriteString("\n" + indent(stWarn.Render(wrapText("the fields cannot be read: "+v.detailErr, room)), 2) + "\n")
 		b.WriteString(stDim.Render("  usually means the gpg agent is locked — copy once with [c]") + "\n")
 	case len(v.detailFields) == 0:
 		b.WriteString("\n" + stDim.Render("  the entry has no fields beyond the password itself") + "\n")
 	default:
 		b.WriteString("\n")
 		for _, k := range sortedKeys(v.detailFields) {
-			row(k, stFg.Render(trunc(v.detailFields[k], room)))
+			row(k, v.detailFields[k], stFg)
 		}
 		b.WriteString("\n" + stDim.Render("  [c] hands the password straight to the clipboard without it passing\n"+
 			"  through keyforge at all, and pass clears it after 45 seconds. [v] brings\n"+
