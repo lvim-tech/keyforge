@@ -29,6 +29,10 @@ import (
 	"github.com/lvim-tech/keyforge/internal/sys"
 )
 
+// secretCap is how much of one entry fits in locked memory: far more than any password, and still
+// one page. An entry past it is refused rather than read short — see decrypt.
+const secretCap = 4096
+
 // Available reports whether `pass` is installed and initialised.
 func Available() bool {
 	if !sys.Have("pass") {
@@ -179,6 +183,13 @@ func ValidName(name string) error {
 		if seg == "." || seg == ".." {
 			return fmt.Errorf("%q leads outside the store", name)
 		}
+		// A leading dash makes the name an OPTION to every `pass` invocation below rather than
+		// an entry: `pass rm --force -q` is parsed by getopt, not looked up. Strictly only the
+		// first segment can be misread that way, but a rule that holds for every segment is one
+		// the user can be told in a sentence, and no real entry starts with a dash anyway.
+		if strings.HasPrefix(seg, "-") {
+			return fmt.Errorf("a segment cannot begin with %q — pass would read it as an option", "-")
+		}
 	}
 	return nil
 }
@@ -194,7 +205,7 @@ func Insert(name, secret string, meta map[string]string) error {
 	return write(name, func(w io.Writer) error {
 		_, err := io.WriteString(w, secret)
 		return err
-	}, meta)
+	}, renderMeta(meta))
 }
 
 // InsertSecret writes a secret held in locked memory. It refuses to overwrite.
@@ -211,7 +222,7 @@ func InsertSecret(name string, secret *sys.Secret, meta map[string]string) error
 	return write(name, func(w io.Writer) error {
 		_, err := secret.WriteTo(w)
 		return err
-	}, meta)
+	}, renderMeta(meta))
 }
 
 // Replace overwrites an existing entry. It refuses to CREATE one, which is the mirror of Insert:
@@ -226,7 +237,27 @@ func Replace(name string, secret *sys.Secret, meta map[string]string) error {
 	return write(name, func(w io.Writer) error {
 		_, err := secret.WriteTo(w)
 		return err
-	}, meta)
+	}, renderMeta(meta))
+}
+
+// ReplaceBody overwrites an existing entry with a metadata block given VERBATIM.
+//
+// It exists because Replace takes a map, and a map cannot represent what a `pass` entry may hold:
+// a line without a colon (a recovery-code block), the order the user put the fields in, a field
+// keyforge has no name for. Rewriting the password of such an entry through Replace silently
+// dropped all of it. The caller reads the old block with Body, edits the lines it means to change,
+// and hands the rest back untouched.
+func ReplaceBody(name string, secret *sys.Secret, body string) error {
+	if err := ValidName(name); err != nil {
+		return err
+	}
+	if !Exists(name) {
+		return fmt.Errorf("no entry %q", name)
+	}
+	return write(name, func(w io.Writer) error {
+		_, err := secret.WriteTo(w)
+		return err
+	}, body)
 }
 
 // write runs `pass insert --multiline` and feeds it the body through a pipe of our own.
@@ -240,7 +271,7 @@ func Replace(name string, secret *sys.Secret, meta map[string]string) error {
 // --force is always given. Not to overwrite blindly — Insert and Replace have already decided that
 // question in Go, where the answer can be reported properly — but because without it `pass` asks
 // for confirmation on stdin, and the "y" it is waiting for would be read out of the password.
-func write(name string, secret func(io.Writer) error, meta map[string]string) error {
+func write(name string, secret func(io.Writer) error, body string) error {
 	pr, pw, err := os.Pipe()
 	if err != nil {
 		return fmt.Errorf("pipe: %w", err)
@@ -259,7 +290,7 @@ func write(name string, secret func(io.Writer) error, meta map[string]string) er
 	// The child holds its own descriptor now; ours must go, or the read end never sees EOF.
 	_ = pr.Close()
 
-	werr := writeBody(pw, secret, meta)
+	werr := writeBody(pw, secret, body)
 	_ = pw.Close()
 
 	if err := cmd.Wait(); err != nil {
@@ -275,20 +306,34 @@ func write(name string, secret func(io.Writer) error, meta map[string]string) er
 // writeBody lays out the entry: the password on the first line, metadata below it. That order is
 // the convention the rest of the pass ecosystem reads — `pass show -c` copies line one and nothing
 // else, so anything written above the password would be copied instead of it.
-func writeBody(w io.Writer, secret func(io.Writer) error, meta map[string]string) error {
+func writeBody(w io.Writer, secret func(io.Writer) error, body string) error {
 	if err := secret(w); err != nil {
 		return err
 	}
 	if _, err := io.WriteString(w, "\n"); err != nil {
 		return err
 	}
-	// Deterministic order, so the same inputs produce the same file and a git-backed store shows
-	// meaningful diffs instead of reordered noise.
+	if body == "" {
+		return nil
+	}
+	if !strings.HasSuffix(body, "\n") {
+		body += "\n"
+	}
+	_, err := io.WriteString(w, body)
+	return err
+}
+
+// renderMeta lays a metadata map out as the block that goes below the password.
+//
+// Deterministic order, so the same inputs produce the same file and a git-backed store shows
+// meaningful diffs instead of reordered noise.
+func renderMeta(meta map[string]string) string {
 	keys := make([]string, 0, len(meta))
 	for k := range meta {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
+	var b strings.Builder
 	for _, k := range keys {
 		v := strings.TrimSpace(meta[k])
 		if v == "" {
@@ -296,11 +341,61 @@ func writeBody(w io.Writer, secret func(io.Writer) error, meta map[string]string
 		}
 		// A newline in a value would forge an extra field; a field is one line by definition.
 		v = strings.ReplaceAll(v, "\n", " ")
-		if _, err := fmt.Fprintf(w, "%s: %s\n", k, v); err != nil {
-			return err
-		}
+		fmt.Fprintf(&b, "%s: %s\n", k, v)
 	}
-	return nil
+	return b.String()
+}
+
+// SetFields edits a metadata block in place, leaving every line it was not asked about alone.
+//
+// This is the half of "an edit must not lose anything" that a map cannot do. A value of "" removes
+// the field; a key that is not there yet is appended; everything else — free-form lines, field
+// order, fields keyforge does not know the meaning of — comes back exactly as it went in. Pure and
+// therefore testable without a store, which is the other reason it is a function rather than a
+// clause inside the form.
+func SetFields(body string, set map[string]string) string {
+	keys := make([]string, 0, len(set))
+	for k := range set {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	trailing := strings.HasSuffix(body, "\n")
+	var lines []string
+	if body != "" {
+		lines = strings.Split(strings.TrimSuffix(body, "\n"), "\n")
+	}
+
+	done := map[string]bool{}
+	out := make([]string, 0, len(lines)+len(keys))
+	for _, l := range lines {
+		k, _, ok := strings.Cut(l, ":")
+		k = strings.TrimSpace(k)
+		if v, ours := set[k]; ok && ours && !done[k] {
+			done[k] = true
+			if v = strings.TrimSpace(v); v == "" {
+				continue // the field was cleared: the line goes with it
+			}
+			out = append(out, k+": "+strings.ReplaceAll(v, "\n", " "))
+			continue
+		}
+		out = append(out, l)
+	}
+	for _, k := range keys {
+		v := strings.TrimSpace(set[k])
+		if done[k] || v == "" {
+			continue
+		}
+		out = append(out, k+": "+strings.ReplaceAll(v, "\n", " "))
+	}
+	if len(out) == 0 {
+		return ""
+	}
+	res := strings.Join(out, "\n")
+	if trailing || len(out) > len(lines) {
+		res += "\n"
+	}
+	return res
 }
 
 // Remove deletes an entry. Nothing here asks whether you are sure — the view does that, where the
@@ -317,7 +412,7 @@ func Remove(name string) error {
 		return err
 	}
 	if !res.OK() {
-		return fmt.Errorf("pass rm: %s", firstLine(res.Stderr, "delete failed"))
+		return fmt.Errorf("pass rm: %s", sys.FirstLine(res.Stderr, "delete failed"))
 	}
 	return nil
 }
@@ -345,7 +440,7 @@ func Move(from, to string) error {
 		return err
 	}
 	if !res.OK() {
-		return fmt.Errorf("pass mv: %s", firstLine(res.Stderr, "move failed"))
+		return fmt.Errorf("pass mv: %s", sys.FirstLine(res.Stderr, "move failed"))
 	}
 	return nil
 }
@@ -415,8 +510,7 @@ func decrypt(name string) (*sys.Secret, error) {
 	// Our copy of the write end must go, or the read below never sees EOF.
 	_ = pw.Close()
 
-	// 4 KB is far more than any password and still one page of locked memory.
-	sec, err := sys.NewSecret(4096)
+	sec, err := sys.NewSecret(secretCap)
 	if err != nil {
 		_ = pr.Close()
 		_ = cmd.Wait()
@@ -427,11 +521,18 @@ func decrypt(name string) (*sys.Secret, error) {
 
 	if err := cmd.Wait(); err != nil {
 		sec.Close()
-		return nil, fmt.Errorf("%s", firstLine(errb.String(), "gpg did not unlock the entry"))
+		return nil, fmt.Errorf("%s", sys.FirstLine(errb.String(), "gpg did not unlock the entry"))
 	}
 	if rerr != nil {
 		sec.Close()
 		return nil, rerr
+	}
+	// Refused rather than truncated. A larger entry read through here comes back with its tail
+	// missing, and the caller that reads it in order to write it back — the edit form — would then
+	// persist the truncation over the real record.
+	if sec.Overflowed() {
+		sec.Close()
+		return nil, fmt.Errorf("%q is larger than %d bytes — keyforge will not open it half-way", name, secretCap)
 	}
 	return sec, nil
 }
@@ -443,12 +544,24 @@ func decrypt(name string) (*sys.Secret, error) {
 // accident. Nothing above needs the password: copying goes through CopyCmd, which never comes back
 // here at all.
 func Fields(name string) (map[string]string, error) {
+	fields, _, err := Body(name)
+	return fields, err
+}
+
+// Body returns an entry's metadata twice over: parsed into fields, and verbatim.
+//
+// Two answers from ONE decryption, which is the point — an edit needs both (the fields to fill the
+// form, the block to write back unharmed) and asking for them separately would decrypt twice and
+// prompt twice. The verbatim half exists because parseFields cannot represent everything a `pass`
+// entry legally holds, and rewriting an entry from the parsed half alone is how a note or a
+// recovery-code block disappears.
+func Body(name string) (map[string]string, string, error) {
 	if err := ValidName(name); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	sec, err := decrypt(name)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer sec.Close()
 
@@ -458,20 +571,25 @@ func Fields(name string) (map[string]string, error) {
 	// return a map at all.
 	sec.DropThrough('\n')
 
+	var body string
+	sec.Use(func(rest string) { body = rest })
+	return parseFields(body), body, nil
+}
+
+// parseFields reads the "k: v" lines out of a metadata block, ignoring everything that is not one.
+func parseFields(body string) map[string]string {
 	out := map[string]string{}
-	sec.Use(func(rest string) {
-		for _, l := range strings.Split(rest, "\n") {
-			k, v, ok := strings.Cut(l, ":")
-			if !ok {
-				continue
-			}
-			k, v = strings.TrimSpace(k), strings.TrimSpace(v)
-			if k != "" && v != "" {
-				out[k] = v
-			}
+	for _, l := range strings.Split(body, "\n") {
+		k, v, ok := strings.Cut(l, ":")
+		if !ok {
+			continue
 		}
-	})
-	return out, nil
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		if k != "" && v != "" {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // SuggestName proposes a store path for a secret belonging to a key or host, following the
@@ -480,16 +598,4 @@ func SuggestName(kind, subject string) string {
 	subject = strings.TrimSuffix(subject, ".pub")
 	subject = strings.ReplaceAll(subject, " ", "-")
 	return path.Join(kind, subject)
-}
-
-// firstLine reduces a tool's complaint to the part worth showing on a one-line status bar.
-func firstLine(s, fallback string) string {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return fallback
-	}
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[:i]
-	}
-	return s
 }

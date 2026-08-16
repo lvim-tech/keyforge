@@ -191,7 +191,12 @@ func Phrase(o PhraseOptions) (string, float64, error) {
 		}
 		w := pool[n]
 		if o.Capitals {
-			w = strings.ToUpper(w[:1]) + w[1:]
+			// By rune, not by byte. The embedded list is ASCII today, so w[:1] happens to work;
+			// it halves the first character of anything else, and a Cyrillic word list is the
+			// obvious next thing to put in here — main.go's own capitalise already says so.
+			if r := []rune(w); len(r) > 0 {
+				w = strings.ToUpper(string(r[0])) + string(r[1:])
+			}
 		}
 		parts = append(parts, w)
 	}

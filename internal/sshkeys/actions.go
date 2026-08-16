@@ -33,8 +33,35 @@ func DefaultSpec() Spec {
 	}
 }
 
-// Path is the absolute location the key will be written to.
+// Path is the absolute location the key will be written to. It is only meaningful for a name
+// ValidName has accepted — Join happily resolves "../" and would put the key anywhere.
 func (s Spec) Path() string { return filepath.Join(Dir(), s.Name) }
+
+// ValidName rejects a file name that would put a new key somewhere other than ~/.ssh.
+//
+// The same reasoning as passstore.ValidName, and for the same reason it lives here rather than in
+// the form: the name becomes a path by a plain filepath.Join, so "../backup/key" writes the private
+// half outside the 0700 directory while the success line still says it is in ~/.ssh. A leading dash
+// is refused on top of that, so the name can never be read as an ssh-keygen option.
+func ValidName(name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("the file name is required")
+	}
+	if strings.ContainsRune(name, filepath.Separator) || strings.ContainsRune(name, '/') {
+		return fmt.Errorf("the name is a file inside %s, not a path", Dir())
+	}
+	if name == "." || name == ".." {
+		return fmt.Errorf("%q is not a file name", name)
+	}
+	if strings.HasPrefix(name, "-") {
+		return fmt.Errorf("a name cannot begin with %q — ssh-keygen would read it as an option", "-")
+	}
+	return nil
+}
+
+// Validate reports whether the spec describes a key that can safely be created.
+func (s Spec) Validate() error { return ValidName(s.Name) }
 
 // Exists reports whether something already occupies that path — ssh-keygen would otherwise ask,
 // and a prompt hidden behind a TUI is how a key gets silently overwritten.
@@ -104,7 +131,8 @@ func RevokeCmd(pubLine, target string) (*exec.Cmd, error) {
 		`grep -vF %s "$f.keyforge.bak" > "$f"; `+
 		`echo "lines removed: $n (backup: $f.keyforge.bak)"`,
 		shellQuote(blob), shellQuote(blob))
-	return sys.Interactive("ssh", "-t", target, script), nil
+	// "--" ends ssh's own options, so the target is a destination whatever it looks like.
+	return sys.Interactive("ssh", "-t", "--", target, script), nil
 }
 
 // AuthorizedKeysCmd lists a remote account's authorized_keys with fingerprints, so a stolen key can
@@ -113,7 +141,7 @@ func AuthorizedKeysCmd(target string) *exec.Cmd {
 	script := `f="$HOME/.ssh/authorized_keys"; ` +
 		`[ -f "$f" ] || { echo "no authorized_keys"; exit 0; }; ` +
 		`ssh-keygen -lf "$f" 2>/dev/null || cat "$f"`
-	return sys.Interactive("ssh", "-t", target, script)
+	return sys.Interactive("ssh", "-t", "--", target, script)
 }
 
 // keyBlob extracts the base64 body of a public key line — the part that identifies the key itself,

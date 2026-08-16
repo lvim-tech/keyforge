@@ -199,7 +199,7 @@ func ClearCache() error {
 		}
 		res, err := sys.Run("gpg-connect-agent", "CLEAR_PASSPHRASE --mode=normal "+grip, "/bye")
 		if err != nil || !res.OK() {
-			failed = append(failed, grip[:8])
+			failed = append(failed, shortGrip(grip))
 		}
 	}
 	if len(failed) > 0 {
@@ -210,7 +210,7 @@ func ClearCache() error {
 	var still []string
 	for grip, p := range Protections() {
 		if p.Cached {
-			still = append(still, grip[:8])
+			still = append(still, shortGrip(grip))
 		}
 	}
 	if len(still) > 0 {
@@ -271,7 +271,7 @@ func NewChallenge(recipient string) (string, error) {
 	cmd.Stderr = errb
 	if err := cmd.Run(); err != nil {
 		_ = os.Remove(path)
-		return "", fmt.Errorf("gpg --encrypt: %s", firstLine(errb.String(), err.Error()))
+		return "", fmt.Errorf("gpg --encrypt: %s", sys.FirstLine(errb.String(), err.Error()))
 	}
 	return path, nil
 }
@@ -300,18 +300,6 @@ func UnlockCmd(challenge string, stderr io.Writer) *exec.Cmd {
 	cmd.Stdout = io.Discard
 	cmd.Stderr = stderr
 	return cmd
-}
-
-// firstLine reduces a tool's complaint to the part worth putting on a one-line status bar.
-func firstLine(s, fallback string) string {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return fallback
-	}
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[:i]
-	}
-	return s
 }
 
 // CacheTTL is how long gpg-agent will keep a passphrase after it is entered.
@@ -366,8 +354,8 @@ func SetCacheTTL(defaultTTL, maxTTL time.Duration) error {
 
 	seen := map[string]bool{}
 	for i, l := range lines {
-		key, _, ok := strings.Cut(strings.TrimSpace(l), " ")
-		if !ok {
+		key, _ := confLine(l)
+		if key == "" {
 			continue
 		}
 		if v, isOurs := want[key]; isOurs {
@@ -449,11 +437,11 @@ func AgentCacheTTL() CacheTTL {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		key, val, ok := strings.Cut(line, " ")
-		if !ok {
+		key, val := confLine(line)
+		if key == "" || val == "" {
 			continue
 		}
-		n, err := strconv.Atoi(strings.TrimSpace(val))
+		n, err := strconv.Atoi(val)
 		if err != nil {
 			continue
 		}
@@ -465,4 +453,38 @@ func AgentCacheTTL() CacheTTL {
 		}
 	}
 	return t
+}
+
+// confLine splits one line of gpg-agent.conf into its option and its value.
+//
+// gpg separates the two with ANY whitespace and also accepts "name=value"; this used to cut on a
+// single space, so a hand-written conf with a tab in it was unrecognised. The cost was not cosmetic:
+// the reader reported gpg's defaults, the "already in force" comparison never matched, and keyforge
+// rewrote the file and RELOADED the agent — flushing every cached passphrase — on every single
+// launch, which is exactly what that comparison exists to prevent.
+func confLine(l string) (key, val string) {
+	f := strings.Fields(strings.TrimSpace(l))
+	if len(f) == 0 || strings.HasPrefix(f[0], "#") {
+		return "", ""
+	}
+	key = f[0]
+	if len(f) > 1 {
+		val = f[1]
+	}
+	if k, v, ok := strings.Cut(key, "="); ok {
+		key, val = k, v
+	}
+	return key, val
+}
+
+// shortGrip trims a keygrip to a glance without assuming it is long enough to trim.
+//
+// The grips come from whatever gpg-agent answered, and slicing [:8] on a short or placeholder field
+// panicked the entire interface from inside the lock — the one moment the program is meant to be
+// covering the screen rather than crashing off it.
+func shortGrip(g string) string {
+	if len(g) > 8 {
+		return g[:8]
+	}
+	return g
 }

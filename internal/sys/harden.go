@@ -64,6 +64,11 @@ type Secret struct {
 	buf    []byte
 	n      int
 	locked bool
+	// over records that something did not fit. A fixed capacity has to drop the excess somewhere,
+	// and dropping it silently is the dangerous half: a typed password and its confirmation are cut
+	// at the same byte, so they still compare equal and the store keeps a value the user has never
+	// seen. The flag is how a caller can refuse instead.
+	over bool
 }
 
 // NewSecret allocates a locked buffer of the given capacity.
@@ -93,18 +98,61 @@ func NewSecret(size int) (*Secret, error) {
 // Locked reports whether the buffer is actually pinned in RAM.
 func (s *Secret) Locked() bool { return s != nil && s.locked }
 
-// Append adds bytes, silently ignoring anything past the capacity.
+// Overflowed reports whether anything has been dropped for want of capacity.
+//
+// Every caller that stores what it collected must ask: an entry cut in half is not a shorter secret,
+// it is the wrong one, and the only moment it can still be noticed is before it is written.
+func (s *Secret) Overflowed() bool { return s != nil && s.over }
+
+// Append adds bytes, dropping anything past the capacity and recording that it did.
 func (s *Secret) Append(b []byte) {
 	if s == nil {
 		return
 	}
 	for _, c := range b {
 		if s.n >= len(s.buf) {
+			s.over = true
+			// A multi-byte character cut at the boundary is worse than a missing one: half a
+			// rune makes Len's rune count wrong and renders as a replacement character. The
+			// partial head goes with the tail that did not fit.
+			s.trimPartialRune()
 			return
 		}
 		s.buf[s.n] = c
 		s.n++
 	}
+}
+
+// trimPartialRune drops a UTF-8 sequence the capacity limit cut in half.
+func (s *Secret) trimPartialRune() {
+	i := s.n
+	for i > 0 && s.buf[i-1]&0xC0 == 0x80 {
+		i--
+	}
+	if i == 0 {
+		return
+	}
+	lead := s.buf[i-1]
+	want := 0
+	switch {
+	case lead&0x80 == 0x00:
+		return // ASCII: nothing was split
+	case lead&0xE0 == 0xC0:
+		want = 2
+	case lead&0xF0 == 0xE0:
+		want = 3
+	case lead&0xF8 == 0xF0:
+		want = 4
+	default:
+		return // not a lead byte at all; leave the bytes as they are
+	}
+	if s.n-(i-1) >= want {
+		return
+	}
+	for j := i - 1; j < s.n; j++ {
+		s.buf[j] = 0
+	}
+	s.n = i - 1
 }
 
 // Backspace removes the last byte, respecting UTF-8 continuation bytes so deleting one Cyrillic
@@ -144,7 +192,7 @@ func (s *Secret) Reset() {
 	for i := range s.buf[:s.n] {
 		s.buf[i] = 0
 	}
-	s.n = 0
+	s.n, s.over = 0, false
 }
 
 // Use hands the value to fn as a string for the moment it is needed.
@@ -285,5 +333,5 @@ func (s *Secret) Close() {
 		_ = unix.Munlock(s.buf)
 	}
 	_ = unix.Munmap(s.buf)
-	s.buf, s.n, s.locked = nil, 0, false
+	s.buf, s.n, s.locked, s.over = nil, 0, false, false
 }

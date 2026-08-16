@@ -92,9 +92,14 @@ func newPassView(c config.Config, rules *ruleCache) *passView {
 
 func (v *passView) Title() string { return "Passwords" }
 
-func (v *passView) capturesInput() bool {
-	return v.mode == smForm || v.mode == smMove || v.mode == smFilter
-}
+// capturesInput reports that the shell must not read the keys itself.
+//
+// Every mode but the list, not just the ones that take typing. The shell handles q, tab, h and l
+// before the view sees them, so the detail pane's own "q means back" branch was unreachable and the
+// key quit the whole program instead; worse, tab walked out of the delete confirmation while the
+// view stayed in it, so coming back to the tab dropped the user into a confirmation raised minutes
+// earlier. A modal pane owns the keyboard until it is left — that is what makes it modal.
+func (v *passView) capturesInput() bool { return v.mode != smList }
 
 func (v *passView) Init() tea.Cmd { return loadPass }
 
@@ -259,13 +264,13 @@ func (v *passView) updateList(msg tea.KeyMsg) (view, tea.Cmd) {
 		// Rewriting the entry replaces the whole file, metadata included, so the old fields are read
 		// back first and carried over. That read decrypts, and decryption can fail with the agent
 		// locked — in which case the form says so instead of quietly dropping login and url.
-		fields, err := passstore.Fields(e.Name)
+		fields, body, err := passstore.Body(e.Name)
 		readErr := ""
 		if err != nil {
 			readErr = err.Error()
-			fields = map[string]string{}
+			fields, body = map[string]string{}, ""
 		}
-		v.form = newPassFormReplace(e.Name, fields, readErr)
+		v.form = newPassFormReplace(e.Name, fields, body, readErr)
 		v.form.rules, v.form.po = v.rules, v.po
 		v.mode = smForm
 
@@ -475,10 +480,12 @@ func (v *passView) revealedLine(room int) string {
 	if !v.rev.on || v.revealed == nil {
 		return stDim.Render("  password     ") + stDim.Render("•••••••• ") + stKey.Render("[v]") + stDim.Render(" shows it")
 	}
-	// Folded, not cut. A password shown as "hunter2-corr…" is a password you cannot read, and
-	// reading it is the entire reason [v] exists.
+	// Folded, not cut — and folded by RUNES, not by words. A password shown as "hunter2-corr…"
+	// is a password you cannot read, and one run through wrapText is a password you can read
+	// wrong: that function normalises whitespace, so a value holding two spaces was displayed
+	// with one. Reading the exact value is the entire reason [v] exists.
 	shown := ""
-	v.revealed.Use(func(s string) { shown = wrapText(s, room) })
+	v.revealed.Use(func(s string) { shown = foldRunes(s, room) })
 	out := ""
 	for i, l := range strings.Split(shown, "\n") {
 		if i == 0 {
@@ -503,7 +510,7 @@ func (v *passView) renderDetail(w int) string {
 	// with its continuation aligned under the column. Cutting made the box tidy and the answer
 	// unreadable: a path ending in "…" does not say which entry you are looking at, which is
 	// the only question this pane exists to answer.
-	room := maxi(w-20, 24)
+	room := max(w-20, 24)
 	var b strings.Builder
 	row := func(label, val string, st lipgloss.Style) {
 		if val == "" {
@@ -671,7 +678,7 @@ func (v *passView) renderList(w, h int) string {
 	// is eighteen rows plus however many folders fall inside it — and the shell, which cuts the
 	// body to the height it budgeted, took the difference off the bottom. The last rows were
 	// drawn and then chopped, so the cursor could walk onto entries that were not on screen.
-	start, end := v.treeWindow(maxi(h-7, 1))
+	start, end := v.treeWindow(max(h-7, 1))
 	if start > 0 {
 		b.WriteString(stDim.Render(fmt.Sprintf("     … %d above", start)) + "\n")
 	}
@@ -692,7 +699,7 @@ func (v *passView) renderList(w, h int) string {
 			row = stRowSel
 		}
 		age := stDim.Background(row.GetBackground())
-		line := cell("    "+e.Leaf, maxi(w-26, 20), row) + " " +
+		line := cell("    "+e.Leaf, max(w-26, 20), row) + " " +
 			cell(e.Modified.Format("2006-01-02"), 12, age)
 		b.WriteString(mark + line + "\n")
 	}
@@ -706,7 +713,7 @@ func (v *passView) renderList(w, h int) string {
 	}
 
 	if v.rev.on && v.revealed != nil {
-		b.WriteString("\n" + v.revealedLine(maxi(w-20, 24)) + "\n")
+		b.WriteString("\n" + v.revealedLine(max(w-20, 24)) + "\n")
 	}
 
 	b.WriteString("\n" + stDim.Render(fmt.Sprintf("  %d %s in %s", len(v.entries), plural(len(v.entries), "entry", "entries"), passstore.Dir())))

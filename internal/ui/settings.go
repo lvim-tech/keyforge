@@ -287,7 +287,7 @@ func (v *settingsView) Render(w, h int) string {
 	}
 
 	if v.sel < len(settings) {
-		b.WriteString("\n" + indent(stDim.Render(wrapText(settings[v.sel].note, maxi(w-6, 30))), 2) + "\n")
+		b.WriteString("\n" + indent(stDim.Render(wrapText(settings[v.sel].note, max(w-6, 30))), 2) + "\n")
 	}
 	if v.dirty {
 		b.WriteString("\n  " + stWarn.Render("changed — [w] writes it"))
@@ -349,6 +349,30 @@ func mins(n int) string {
 // remainder starting hard against the left edge instead of under its own column. Folding a long
 // word here means the caller can indent the continuation, because the caller is the one that
 // knows where the column is.
+// foldRunes cuts a string into lines of at most width runes, changing nothing else.
+//
+// wrapText is the wrong tool for a VALUE. It works in strings.Fields, so it collapses runs of
+// whitespace and drops leading and trailing spaces — harmless for prose and wrong for the one
+// feature whose entire job is showing exactly what is stored: a password of "korap  vezna" was
+// displayed as "korap vezna", read off the screen, typed into a phone, and did not work, with
+// nothing on screen to say why.
+func foldRunes(s string, width int) string {
+	if width < 1 {
+		width = 1
+	}
+	r := []rune(s)
+	if len(r) <= width {
+		return s
+	}
+	var out []string
+	for len(r) > 0 {
+		n := mini(width, len(r))
+		out = append(out, string(r[:n]))
+		r = r[n:]
+	}
+	return strings.Join(out, "\n")
+}
+
 func wrapText(s string, width int) string {
 	if width < 1 {
 		width = 1

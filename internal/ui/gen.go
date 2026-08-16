@@ -168,14 +168,38 @@ func (v *genView) regen() {
 // early by the older timer.
 var clipToken int
 
+// clipHeld records that a value this program copied is still sitting in the clipboard.
+//
+// The timer is a tea.Tick, and a tick is only ever delivered to a running program with the lock
+// open. Neither of those is guaranteed: the idle lock closes on precisely the walk-away this
+// exists for, and quitting kills the goroutine that would have fired. Without a flag to ask, the
+// clipboard kept a freshly generated passphrase for as long as the session manager did — behind a
+// screen saying the store was locked.
+var clipHeld bool
+
 const clipTimeout = 45 * time.Second
+
+// clearClipboardNow wipes a copied value ahead of its timer, and reports whether there was one.
+// Called when the lock closes and on the way out, where the tick will never arrive.
+func clearClipboardNow() bool {
+	if !clipHeld {
+		return false
+	}
+	sys.ClearClipboard()
+	clipHeld = false
+	// A new token, so a tick already in flight for the value just wiped does not clear a value
+	// copied after it.
+	clipToken++
+	return true
+}
 
 type clipExpiredMsg int
 
 func (v *genView) Update(msg tea.Msg) (view, tea.Cmd) {
 	if t, ok := msg.(clipExpiredMsg); ok {
-		if int(t) == clipToken {
+		if int(t) == clipToken && clipHeld {
 			sys.ClearClipboard()
+			clipHeld = false
 			return v, status("the clipboard was cleared")
 		}
 		return v, nil
@@ -252,6 +276,7 @@ func (v *genView) Update(msg tea.Msg) (view, tea.Cmd) {
 		// already teaches the user to expect. This tab left brand-new passphrases sitting in
 		// the most-taken-from place on the machine with no expiry at all.
 		clipToken++
+		clipHeld = true
 		token := clipToken
 		return v, tea.Batch(
 			status("copied — the clipboard is cleared in %s", short(clipTimeout)),
@@ -386,7 +411,7 @@ func (v *genView) Render(w, h int) string {
 			stDim.Render("capitals"), onoff(v.po.Capitals),
 			stDim.Render("digits"), onoff(v.po.Number)))
 		b.WriteString(stDim.Render(fmt.Sprintf("  word list: %d words → %.1f bits per word",
-			passgen.WordCount(), v.bits/float64(maxi(v.po.Words, 1)))) + "\n")
+			passgen.WordCount(), v.bits/float64(max(v.po.Words, 1)))) + "\n")
 	} else {
 		b.WriteString(fmt.Sprintf("  %s %d   %s %s   %s %s   %s %s   %s %s\n",
 			stDim.Render("length"), v.co.Length,
@@ -435,11 +460,4 @@ func onoff(b bool) string {
 		return stGood.Render("yes")
 	}
 	return stDim.Render("no")
-}
-
-func maxi(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }

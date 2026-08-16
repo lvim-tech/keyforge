@@ -180,3 +180,18 @@ func ClearClipboard() {
 		_, _ = fmt.Fprint(tty, "\x1b]52;c;!\a")
 	}
 }
+
+// FirstLine reduces a tool's complaint to the part worth putting on a one-line status bar.
+//
+// One copy, in the package both callers already import. It existed identically in passstore and in
+// gpgkeys — harmless while they agreed, and exactly the shape of thing that stops agreeing.
+func FirstLine(s, fallback string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return fallback
+	}
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	return s
+}

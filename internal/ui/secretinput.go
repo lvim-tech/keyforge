@@ -57,6 +57,9 @@ func (s *secretInput) update(msg tea.KeyMsg) bool {
 
 func (s *secretInput) empty() bool { return s.buf == nil || s.buf.Empty() }
 
+// overflowed reports that the field ran out of buffer and dropped what came after.
+func (s *secretInput) overflowed() bool { return s.buf != nil && s.buf.Overflowed() }
+
 // secret exposes the locked buffer itself, for the two operations that must not go through a string:
 // comparing a value against its confirmation, and writing it into `pass`.
 func (s *secretInput) secret() *sys.Secret { return s.buf }

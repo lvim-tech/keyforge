@@ -138,7 +138,7 @@ func window(total, sel, room int) (start, end int) {
 // indentation and the styling — the layout is done around the text, never inside a Render.
 func hanging(prefix, text string, width int) []string {
 	pad := strings.Repeat(" ", len([]rune(prefix)))
-	body := wrapText(text, maxi(width-len([]rune(prefix)), 12))
+	body := wrapText(text, max(width-len([]rune(prefix)), 12))
 	var out []string
 	for i, l := range strings.Split(body, "\n") {
 		if i == 0 {

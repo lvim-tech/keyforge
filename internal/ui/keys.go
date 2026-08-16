@@ -50,6 +50,9 @@ type keysView struct {
 	// host prompt
 	fHost   input
 	purpose hostPurpose
+	// hostNames are the aliases from ~/.ssh/config, read when the prompt opens rather than on
+	// every frame of it.
+	hostNames []string
 }
 
 // newKeysView takes the config for kdf_rounds, which until now was written by the config and
@@ -69,7 +72,10 @@ func newKeysView(c config.Config) *keysView {
 
 func (v *keysView) Title() string { return "Keys" }
 
-func (v *keysView) capturesInput() bool { return v.mode == kmNew || v.mode == kmHost }
+// capturesInput reports that the shell must not read the keys itself. Every mode but the list:
+// the detail pane says [q] goes back and the shell was quitting on it, because it takes q before
+// the view is ever asked. See passView.capturesInput for the whole of it.
+func (v *keysView) capturesInput() bool { return v.mode != kmList }
 
 func (v *keysView) Init() tea.Cmd { return loadKeys }
 
@@ -180,19 +186,31 @@ func (v *keysView) updateList(msg tea.KeyMsg) (view, tea.Cmd) {
 
 	case "d":
 		if _, ok := v.current(); ok {
-			v.mode, v.purpose = kmHost, hpDeploy
-			v.fHost.set("")
+			v.enterHost(hpDeploy)
 		}
 	case "r":
 		if _, ok := v.current(); ok {
-			v.mode, v.purpose = kmHost, hpRevoke
-			v.fHost.set("")
+			v.enterHost(hpRevoke)
 		}
 	case "a":
-		v.mode, v.purpose = kmHost, hpList
-		v.fHost.set("")
+		v.enterHost(hpList)
 	}
 	return v, nil
+}
+
+// enterHost opens the host prompt and reads ~/.ssh/config ONCE, on the way in.
+//
+// The list of aliases is drawn under the field, and renderHost used to parse the file to build it —
+// on every frame, which is every keystroke of the host being typed. It cannot change while the
+// prompt is open.
+func (v *keysView) enterHost(p hostPurpose) {
+	v.mode, v.purpose = kmHost, p
+	v.fHost.set("")
+	v.hostNames = v.hostNames[:0]
+	for h := range sshkeys.ConfigHosts() {
+		v.hostNames = append(v.hostNames, h)
+	}
+	sort.Strings(v.hostNames)
 }
 
 func (v *keysView) updateNew(msg tea.KeyMsg) (view, tea.Cmd) {
@@ -207,14 +225,17 @@ func (v *keysView) updateNew(msg tea.KeyMsg) (view, tea.Cmd) {
 		v.fField = (v.fField + 2) % 3
 		return v, nil
 	case "enter":
-		if v.fName.empty() {
-			return v, failure("the file name is required")
-		}
 		spec := sshkeys.DefaultSpec()
 		if v.rounds > 0 {
 			spec.Rounds = v.rounds
 		}
 		spec.Name = strings.TrimSpace(v.fName.String())
+		// Checked before anything is built from it: the name becomes a path, and a name with
+		// "../" in it writes the private key outside ~/.ssh while every message here still says
+		// otherwise.
+		if err := spec.Validate(); err != nil {
+			return v, failure("%v", err)
+		}
 		spec.Comment = strings.TrimSpace(v.fComment.String())
 		spec.Type = v.fType
 		if spec.Type == "rsa" {
@@ -260,6 +281,13 @@ func (v *keysView) updateHost(msg tea.KeyMsg) (view, tea.Cmd) {
 		target := strings.TrimSpace(v.fHost.String())
 		if target == "" {
 			return v, failure("a host is required")
+		}
+		// A target beginning with a dash is not a host, it is an option: ssh reads
+		// "-oProxyCommand=…" as an instruction to run a local command, so a string pasted into
+		// this field would execute rather than connect. ssh-copy-id has no reliable "--", which
+		// is why the refusal is here rather than in the argument list.
+		if strings.HasPrefix(target, "-") {
+			return v, failure("a host cannot begin with %q — ssh would read it as an option", "-")
 		}
 		v.mode = kmList
 		k, ok := v.current()
@@ -330,7 +358,7 @@ func (v *keysView) buildDetail(k sshkeys.Key) string {
 	if pub, err := sshkeys.PublicKey(k); err == nil {
 		b.WriteString("\n")
 		b.WriteString(stDim.Render("  public key:") + "\n")
-		b.WriteString(stFg.Render("  " + wrap(pub, 76)))
+		b.WriteString(stFg.Render("  " + strings.ReplaceAll(foldRunes(pub, 76), "\n", "\n  ")))
 		b.WriteString("\n")
 	}
 	return b.String()
@@ -362,7 +390,7 @@ func (v *keysView) renderList(w, h int) string {
 	// The rows are windowed to what the terminal can actually show. The shell cuts the body to
 	// the height it budgeted — otherwise the footer is pushed off the bottom — so a list longer
 	// than the screen would lose its tail silently, cursor and all.
-	start, end := window(len(v.keys), v.sel, maxi(h-4, 1))
+	start, end := window(len(v.keys), v.sel, max(h-4, 1))
 	if start > 0 {
 		b.WriteString(stDim.Render(fmt.Sprintf("     … %d above", start)) + "\n")
 	}
@@ -409,7 +437,7 @@ func (v *keysView) renderList(w, h int) string {
 			cell(typText, 12, typStyle.Background(row.GetBackground())) + " " +
 			cell(passText, 8, passStyle.Background(row.GetBackground())) + " " +
 			cell(k.Format, 8, formatStyle.Background(row.GetBackground())) + " " +
-			cell(hosts, maxi(w-56, 10), hostStyle.Background(row.GetBackground()))
+			cell(hosts, max(w-56, 10), hostStyle.Background(row.GetBackground()))
 		b.WriteString(mark + line + "\n")
 	}
 	if end < len(v.keys) {
@@ -418,18 +446,21 @@ func (v *keysView) renderList(w, h int) string {
 
 	if k, ok := v.current(); ok {
 		b.WriteString("\n")
-		sha, _ := sshkeys.Fingerprints(k)
-		for i, l := range strings.Split(wrapText(sha, maxi(w-4, 24)), "\n") {
+		// The fingerprint the scan already read, not a fresh ssh-keygen. Render runs after every
+		// message — and with the idle lock on that is once a second while the tab merely sits
+		// there — so asking Fingerprints here forked two processes per frame for a string that
+		// was already in hand. buildDetail still asks, because it runs once per keypress and
+		// needs the MD5 form too.
+		for _, l := range strings.Split(wrapText(k.Fingerprint, max(w-4, 24)), "\n") {
 			b.WriteString(stDim.Render("  "+l) + "\n")
-			_ = i
 		}
 		if k.Comment != "" {
-			b.WriteString(indent(stDim.Render(wrapText(k.Comment, maxi(w-4, 24))), 2) + "\n")
+			b.WriteString(indent(stDim.Render(wrapText(k.Comment, max(w-4, 24))), 2) + "\n")
 		}
 		// The hosts this key opens, whole. The column holds one line and cuts it, and a key
 		// that opens four aliases is exactly the key whose column tells you the least.
 		if len(k.Hosts) > 0 {
-			for _, l := range hanging("opens: ", strings.Join(k.Hosts, ", "), maxi(w-4, 24)) {
+			for _, l := range hanging("opens: ", strings.Join(k.Hosts, ", "), max(w-4, 24)) {
 				b.WriteString(indent(stDim.Render(l), 2) + "\n")
 			}
 		}
@@ -470,12 +501,7 @@ func (v *keysView) renderHost(w int) string {
 		title = "Show a server's authorized_keys"
 		note = "Lists which keys can log in there, with fingerprints."
 	}
-	hosts := sshkeys.ConfigHosts()
-	var names []string
-	for h := range hosts {
-		names = append(names, h)
-	}
-	sort.Strings(names)
+	names := v.hostNames
 
 	var b strings.Builder
 	b.WriteString(stAccent.Render("  "+title) + "\n\n")
@@ -487,8 +513,12 @@ func (v *keysView) renderHost(w int) string {
 	return stBox.Width(w - 2).Render(b.String())
 }
 
-// shortID trims a recipient to a glance without assuming it is long enough to trim.
-func shortID(id string) string {
+// headID trims a recipient to a glance without assuming it is long enough to trim.
+//
+// Named for the END it keeps. audit.shortID keeps the OTHER one — the last sixteen characters of a
+// fingerprint — and two functions with one name and opposite meanings is a wrong call waiting for
+// its refactor.
+func headID(id string) string {
 	r := []rune(id)
 	if len(r) <= 8 {
 		return id
@@ -513,7 +543,7 @@ func (v *keysView) Footer() string {
 		// Clamped, not sliced. `[:8]` panicked the whole TUI on the first render of this tab
 		// whenever .gpg-id held a short uid — "bob" is a legal recipient, and an empty file
 		// passes Available(), which only stats it.
-		f += "  " + stDim.Render("· pass: "+shortID(passstore.Recipient()))
+		f += "  " + stDim.Render("· pass: "+headID(passstore.Recipient()))
 	}
 	return f
 }
@@ -542,21 +572,4 @@ func padTo(s string, n int) string {
 		return s
 	}
 	return s + strings.Repeat(" ", n-visible)
-}
-
-func wrap(s string, n int) string {
-	var out []string
-	for len(s) > n {
-		out = append(out, s[:n])
-		s = s[n:]
-	}
-	out = append(out, s)
-	return strings.Join(out, "\n  ")
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }

@@ -85,7 +85,7 @@ func (v *auditView) Render(w, h int) string {
 	// Windowed on the FLAT index, the same one the cursor moves along, so the band follows the
 	// selection across the three severity passes rather than per pass. The selected row draws a
 	// second line for its action, hence the extra row of slack.
-	start, end := window(len(v.rep.Findings), v.sel, maxi(h-5, 1))
+	start, end := window(len(v.rep.Findings), v.sel, max(h-5, 1))
 	if start > 0 {
 		b.WriteString(stDim.Render(fmt.Sprintf("     … %d above", start)) + "\n")
 	}
@@ -126,7 +126,7 @@ func (v *auditView) Render(w, h int) string {
 			case audit.Warn:
 				dotStyle = stWarn.Background(bg)
 			}
-			msgW := maxi(w-32, 8)
+			msgW := max(w-32, 8)
 			line := dotStyle.Render(dot) + " " +
 				cell(trunc(f.Subject, 22), 22, row) + " " +
 				cell(f.Message, msgW, row)
@@ -137,14 +137,14 @@ func (v *auditView) Render(w, h int) string {
 				// column; it is not fine for the one finding you stopped on, where the part
 				// that got cut is usually the part that tells you what to do.
 				if len([]rune(f.Message)) > msgW {
-					b.WriteString(indent(stFg.Render(wrapText(f.Message, maxi(w-6, 24))), 5) + "\n")
+					b.WriteString(indent(stFg.Render(wrapText(f.Message, max(w-6, 24))), 5) + "\n")
 				}
 				// Only when there is one. A finding that reports the state is fine is built
 				// with an empty Action on purpose — there is nothing to do about good news —
 				// and drawing the arrow regardless left a bare "→" pointing at nothing, which
 				// reads as a message that failed to load rather than as an absence of one.
 				if f.Action != "" {
-					for _, l := range hanging("→ ", f.Action, maxi(w-6, 24)) {
+					for _, l := range hanging("→ ", f.Action, max(w-6, 24)) {
 						b.WriteString(indent(stNote.Render(l), 5) + "\n")
 					}
 				}
@@ -229,7 +229,7 @@ func (v *gpgView) Render(w, h int) string {
 	}
 	var b strings.Builder
 	b.WriteString(stDim.Render(fmt.Sprintf("  %-18s %-12s %-12s %s", "key", "type", "expires", "identity")) + "\n")
-	gstart, gend := window(len(v.keys), v.sel, maxi(h-3, 1))
+	gstart, gend := window(len(v.keys), v.sel, max(h-3, 1))
 	if gstart > 0 {
 		b.WriteString(stDim.Render(fmt.Sprintf("     … %d above", gstart)) + "\n")
 	}
@@ -268,7 +268,7 @@ func (v *gpgView) Render(w, h int) string {
 			cell(id, 18, row) + " " +
 			cell(k.Type, 12, stFg.Background(bg)) + " " +
 			cell(expText, 12, expStyle.Background(bg)) + " " +
-			cell(uid, maxi(w-48, 10), row) + "\n")
+			cell(uid, max(w-48, 10), row) + "\n")
 	}
 	if gend < len(v.keys) {
 		b.WriteString(stDim.Render(fmt.Sprintf("     … %d below", len(v.keys)-gend)) + "\n")
@@ -279,7 +279,7 @@ func (v *gpgView) Render(w, h int) string {
 		k := v.keys[v.sel]
 		b.WriteString("\n")
 		for _, uid := range k.UIDs {
-			for _, l := range hanging("· ", uid, maxi(w-6, 24)) {
+			for _, l := range hanging("· ", uid, max(w-6, 24)) {
 				b.WriteString(indent(stDim.Render(l), 2) + "\n")
 			}
 		}
@@ -365,7 +365,7 @@ func (v *certView) Render(w, h int) string {
 	}
 	var b strings.Builder
 	b.WriteString(stDim.Render(fmt.Sprintf("  %-32s %-24s %s", "subject", "validity", "file")) + "\n")
-	cstart, cend := window(len(v.list), v.sel, maxi(h-3, 1))
+	cstart, cend := window(len(v.list), v.sel, max(h-3, 1))
 	if cstart > 0 {
 		b.WriteString(stDim.Render(fmt.Sprintf("     … %d above", cstart)) + "\n")
 	}
@@ -391,7 +391,7 @@ func (v *certView) Render(w, h int) string {
 		b.WriteString(mark +
 			cell(subject, 32, row) + " " +
 			cell(c.Summary(), 24, st.Background(bg)) + " " +
-			cell(c.Path, maxi(w-62, 12), stDim.Background(bg)) + "\n")
+			cell(c.Path, max(w-62, 12), stDim.Background(bg)) + "\n")
 	}
 	// The detail of the selected certificate, folded rather than run off the edge. Issuer
 	// strings and SAN lists are routinely longer than a terminal, and the path — the answer to
@@ -399,7 +399,7 @@ func (v *certView) Render(w, h int) string {
 	// cuts.
 	if v.sel < len(v.list) {
 		c := v.list[v.sel]
-		room := maxi(w-13, 24)
+		room := max(w-13, 24)
 		field := func(label, value string, st lipgloss.Style) {
 			if value == "" {
 				return

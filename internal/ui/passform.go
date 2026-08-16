@@ -48,6 +48,13 @@ type passForm struct {
 	origLogin string
 	origURL   string
 
+	// origBody is the entry's metadata block exactly as it was stored, and it is carried through
+	// the form for one reason: an edit must not lose what the form has no field for. The form
+	// shows login and url; a real entry may also hold a note keyforge's own Print tab wrote, an
+	// otp: line, or a block of recovery codes with no colon in them at all. Rebuilding the entry
+	// from the two visible fields deleted every one of those on a routine password change.
+	origBody string
+
 	folders []string
 
 	// The rule, read on demand: ctrl+g must respect it for the same reason the Generator does
@@ -88,9 +95,10 @@ func newPassFormGenerated(value string, bits float64) *passForm {
 
 // newPassFormReplace rewrites the password of an entry that already exists.
 //
-// fields are whatever metadata could be read back; when the agent was locked and nothing could be,
-// the form says so rather than silently writing the entry back with its login and url missing.
-func newPassFormReplace(name string, fields map[string]string, readErr string) *passForm {
+// fields are whatever metadata could be read back and body is that same metadata verbatim; when the
+// agent was locked and nothing could be read, the form says so rather than silently writing the
+// entry back with its login and url missing.
+func newPassFormReplace(name string, fields map[string]string, body, readErr string) *passForm {
 	f := newPassForm("")
 	f.title = "Edit " + name
 	f.replace, f.fixed = true, name
@@ -99,6 +107,7 @@ func newPassFormReplace(name string, fields map[string]string, readErr string) *
 	f.login.set(fields["login"])
 	f.url.set(fields["url"])
 	f.origLogin, f.origURL = fields["login"], fields["url"]
+	f.origBody = body
 	if readErr != "" {
 		f.metaErr = readErr
 	}
@@ -221,6 +230,13 @@ func (f *passForm) submit() (string, error) {
 		return "", fmt.Errorf("the two entries do not match")
 	}
 
+	// A typed value that ran out of buffer is refused rather than stored. The confirmation field
+	// truncates at exactly the same byte, so the two halves of a 600-character paste "match" and
+	// the store quietly keeps the first 512 — a password that will never open anything.
+	if f.sec.overflowed() || f.confirm.overflowed() {
+		return "", fmt.Errorf("the password is longer than this field can hold — it would be stored cut short")
+	}
+
 	login := strings.TrimSpace(f.login.String())
 	url := strings.TrimSpace(f.url.String())
 	meta := map[string]string{}
@@ -259,16 +275,36 @@ func (f *passForm) submit() (string, error) {
 		return name, fmt.Errorf("nothing was changed")
 	}
 
+	// The metadata is EDITED rather than rebuilt: the block that was there comes back with only
+	// login and url changed, so a note, an otp: line or a block of recovery codes survives a
+	// password change instead of being deleted by an entry form that has no field for it.
+	body := passstore.SetFields(f.origBody, f.metaChanges(login, url))
+
 	if f.sec.empty() {
 		cur, rerr := passstore.Reveal(name)
 		if rerr != nil {
 			return "", fmt.Errorf("the password could not be read back, so it cannot be kept: %v", rerr)
 		}
-		err := passstore.Replace(name, cur, meta)
+		err := passstore.ReplaceBody(name, cur, body)
 		cur.Close()
 		return name, err
 	}
-	return name, passstore.Replace(name, f.sec.secret(), meta)
+	return name, passstore.ReplaceBody(name, f.sec.secret(), body)
+}
+
+// metaChanges is the set of fields an edit actually asserts something about.
+//
+// Only these are touched in the stored block; a value of "" removes the line, which is how a login
+// that has been cleared in the form disappears from the entry. generated-by/entropy join the set
+// only when the value being written was generated here — leaving the old entry's figures alone
+// would claim an entropy for a password that no longer has it.
+func (f *passForm) metaChanges(login, url string) map[string]string {
+	set := map[string]string{"login": login, "url": url}
+	if f.bits > 0 {
+		set["generated-by"] = "keyforge"
+		set["entropy"] = fmt.Sprintf("%.0f bits", f.bits)
+	}
+	return set
 }
 
 // close releases the locked buffers. Every path out of the form goes through it — a form abandoned

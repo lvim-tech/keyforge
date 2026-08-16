@@ -157,6 +157,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.w, m.h = size.Width, size.Height
 			return m, nil
 		}
+		// The clipboard expiry is not a key press and would be dropped by the filter below —
+		// on exactly the walk-away the lock exists for. afterLock has already wiped a pending
+		// copy, so this is what keeps the bookkeeping straight rather than the wipe itself.
+		if _, ok := msg.(clipExpiredMsg); ok {
+			return m, m.broadcast(msg)
+		}
 		key, ok := msg.(tea.KeyMsg)
 		if !ok {
 			return m, nil
@@ -171,6 +177,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Quitting from the curtain still has to tidy up: the challenge is only ciphertext of a
 			// fixed string, but a file per lock left in /dev/shm is litter with an alarming name.
 			m.lock.clearChallenge()
+			clearClipboardNow()
 			m.quit = true
 			return m, tea.Quit
 		}
@@ -232,6 +239,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c":
 			m.rules.forget()
+			clearClipboardNow()
 			m.quit = true
 			return m, tea.Quit
 		case "ctrl+f":
@@ -254,6 +262,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "q":
 			if !m.viewCaptures() {
+				// The 45-second timer dies with the process, so a value copied ten seconds ago
+				// would otherwise outlive the program that promised to clear it.
+				clearClipboardNow()
 				m.quit = true
 				return m, tea.Quit
 			}
@@ -288,6 +299,12 @@ func (m *Model) afterLock() tea.Cmd {
 	if m.lock.clearAgent {
 		m.rules.forget()
 	}
+	// The clipboard is part of "whatever is on screen goes", and the least visible part of it.
+	// A generated passphrase copied a moment before the idle lock fired would sit there until
+	// something else replaced it: the tick that was to clear it is dropped while the curtain is
+	// up, and a screen that says "locked" over a clipboard holding the passphrase is the lock
+	// telling a lie.
+	clearClipboardNow()
 	return m.broadcast(forgetMsg{})
 }
 
@@ -507,7 +524,7 @@ func (m Model) View() string {
 	// the row lost off the TOP is the tab strip. The intent was right — a body collapsing to
 	// nothing is useless — but rows cannot be conjured. On a window that small the body is
 	// exactly what should shrink.
-	bodyH := maxi(m.h-3-footLines, 0)
+	bodyH := max(m.h-3-footLines, 0)
 
 	// CUT TO THE BUDGET, unconditionally. The views are given the height and are expected to
 	// fit inside it, but a view that draws one line too many pushes the whole composition down

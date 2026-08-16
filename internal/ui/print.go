@@ -165,6 +165,18 @@ func (v *printView) saveRule() error {
 	sec.Append([]byte(body))
 
 	if passstore.Exists(where) {
+		// Overwriting is allowed for the rule's OWN entry and for nothing else. "Keep it in"
+		// takes a free-form store path, so a user who types the name of a real login here — a
+		// perfectly natural thing to do while thinking about where the rule should live — had
+		// that password replaced by the encoded rule, silently and unrecoverably outside a
+		// git-backed store. Insert and Replace were split apart in passstore precisely so no
+		// call could fail to find what you meant and quietly do the other thing; this call
+		// site was the one place that undid it.
+		if where != v.cfg.Sheet.RuleFrom {
+			if err := rulePresent(where); err != nil {
+				return err
+			}
+		}
 		err = passstore.Replace(where, sec, nil)
 	} else {
 		err = passstore.InsertSecret(where, sec, nil)
@@ -186,6 +198,23 @@ func (v *printView) saveRule() error {
 	// a rule that had just been written, and would not survive being put on a sheet.
 	v.rules.adopt(where, body)
 	v.mWhere.set(where)
+	return nil
+}
+
+// rulePresent reports whether an existing entry actually holds a rule, and refuses by name when it
+// does not. Reading it costs a decryption — the same one saving the rule would have needed anyway —
+// and it is the only way to tell a rule entry apart from a password: both are one line of text.
+func rulePresent(name string) error {
+	sec, err := passstore.Reveal(name)
+	if err != nil {
+		return fmt.Errorf("%q already exists and could not be read, so it will not be written over: %v", name, err)
+	}
+	defer sec.Close()
+	ok := false
+	sec.Use(func(body string) { _, ok = sheet.DecodeRuleStrict(body) })
+	if !ok {
+		return fmt.Errorf("%q already exists and does not hold a rule — pick another name", name)
+	}
 	return nil
 }
 
@@ -288,7 +317,7 @@ func (v *printView) updateList(key tea.KeyMsg) (view, tea.Cmd) {
 		if v.sel < len(v.rows) {
 			v.rows = append(v.rows[:v.sel], v.rows[v.sel+1:]...)
 			if v.sel >= len(v.rows) {
-				v.sel = maxi(0, len(v.rows)-1)
+				v.sel = max(0, len(v.rows)-1)
 			}
 		}
 	case "i":
@@ -778,8 +807,8 @@ func (v *printView) Render(w, h int) string {
 // password. The label gets up to half the screen because it is the only column a reader uses to
 // tell one row from another; the sheet line is bounded by what a password can be.
 func (v *printView) columns(w int) (labelW, paperW int) {
-	labelW = maxi(mini(w/3, 52), 18)
-	paperW = maxi(mini(w-labelW-30, 40), 16)
+	labelW = max(mini(w/3, 52), 18)
+	paperW = max(mini(w-labelW-30, 40), 16)
 	return labelW, paperW
 }
 
@@ -825,7 +854,7 @@ func (v *printView) renderList(w, h int) string {
 	// row twice as far as the reader is concerned.
 	labelW, paperW := v.columns(w)
 	b.WriteString(stDim.Render(fmt.Sprintf("     %-*s %-*s %s", labelW, "label", paperW, "on the sheet", "the password")) + "\n")
-	start, end := window(len(v.rows), v.sel, maxi(h-10, 1))
+	start, end := window(len(v.rows), v.sel, max(h-10, 1))
 	if start > 0 {
 		b.WriteString(stDim.Render(fmt.Sprintf("     … %d above", start)) + "\n")
 	}
@@ -849,7 +878,7 @@ func (v *printView) renderList(w, h int) string {
 		b.WriteString(mark + box + " " +
 			cell(tail(r.label, labelW), labelW, st) + " " +
 			cell(r.paper, paperW, stFg.Background(bg)) + " " +
-			cell(real, maxi(w-labelW-paperW-8, 8), stAccent.Background(bg)) + "\n")
+			cell(real, max(w-labelW-paperW-8, 8), stAccent.Background(bg)) + "\n")
 	}
 
 	if end < len(v.rows) {
@@ -866,7 +895,7 @@ func (v *printView) renderList(w, h int) string {
 		for _, line := range strings.Split(v.importNote, "\n") {
 			line = strings.TrimSpace(line)
 			if name, ok := strings.CutPrefix(line, listMark+" "); ok {
-				wrapped := wrapText(name, maxi(w-10, 24))
+				wrapped := wrapText(name, max(w-10, 24))
 				parts := strings.Split(wrapped, "\n")
 				b.WriteString("\n    " + stDim.Render(listMark) + " " + stFg.Render(parts[0]))
 				for _, cont := range parts[1:] {
@@ -874,7 +903,7 @@ func (v *printView) renderList(w, h int) string {
 				}
 				continue
 			}
-			b.WriteString("\n" + indent(stWarn.Render(wrapText(line, maxi(w-4, 30))), 2))
+			b.WriteString("\n" + indent(stWarn.Render(wrapText(line, max(w-4, 30))), 2))
 		}
 		b.WriteString("\n")
 	}
@@ -883,7 +912,7 @@ func (v *printView) renderList(w, h int) string {
 	// two logins at the same site differ only in the part that gets cut.
 	if v.sel < len(v.rows) {
 		if full := v.rows[v.sel].label; full != "" {
-			b.WriteString("\n" + indent(stDim.Render(wrapText(full, maxi(w-4, 30))), 2) + "\n")
+			b.WriteString("\n" + indent(stDim.Render(wrapText(full, max(w-4, 30))), 2) + "\n")
 		}
 	}
 
@@ -942,7 +971,7 @@ func (v *printView) renderMask(w int) string {
 	// inside a box whose width comes from the terminal is text that breaks the box the moment
 	// the terminal is narrower than the author's was — the lines fold at the wrong place and
 	// the frame ends up drawn through them.
-	inner := maxi(w-8, 32)
+	inner := max(w-8, 32)
 	para := func(style func(...string) string, text string) {
 		b.WriteString(indent(style(wrapText(text, inner)), 2) + "\n\n")
 	}
