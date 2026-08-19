@@ -57,6 +57,30 @@ page from being enough on its own, so it has to happen where passwords are actua
 **Passwords** — the `pass` store as a tree, and the operations a store actually needs: add an
 existing password, generate one straight into a folder, copy, change, move, delete, filter.
 
+The tree folds. Folders are rows you can stand on: `space` (or `enter`) opens and closes one,
+`j`/`k` walk only what is visible, and `[a]` on a folder starts a new entry inside it. Which
+folders are open is remembered on this machine, in `~/.config/keyforge/tree-state.json` — it is
+where this terminal is looking, not how the store is organised, so it is deliberately not kept in
+the store. Nothing in the listing is ever decrypted: the tree is built from file names and
+timestamps, which is why opening keyforge never makes pinentry appear.
+
+`K` and `J` move the selected node up and down **among its siblings**, and that order is part of
+the store, so it is written into the store: one plain-text `.order` file in the folder that was
+rearranged, a child name per line, sub-folders marked with a trailing `/`.
+
+```
+# ~/.password-store/websites/.order
+bank/
+abv.bg/
+example.com
+```
+
+Children the file names come first, in its order; everything else falls alphabetically after them,
+so pinning three folders to the top never means listing the other forty. The file is hidden and is
+not a `.gpg`, so `pass ls` (which runs `tree` without `-a`) and keyforge's own scan both ignore it
+— and it travels with the store through git, which a preference kept in a config directory would
+not. It is created lazily: a folder that has never been rearranged has no such file.
+
 The password is typed into a masked field backed by locked memory (see *Process hardening* below)
 and reaches `pass` through a pipe keyforge opens itself — never as an argument, never as a Go string
 that cannot be erased afterwards. Copying goes the other way: `pass show --clip` decrypts and hands

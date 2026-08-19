@@ -133,6 +133,17 @@ var settings = []setting{
 			"a passphrase never retyped is a passphrase eventually forgotten.",
 	},
 	{
+		label: "theme",
+		kind:  skKey,
+		get:   func(v *settingsView) string { return orNone(v.cfg.Theme) },
+		set: func(v *settingsView, s string) error {
+			v.cfg.Theme = strings.TrimSpace(s)
+			return nil
+		},
+		note: "a theme name, or a path to a palette file. Left empty, keyforge follows whatever " +
+			"lvim-colorscheme says is active and falls back to the built-in Everforest. [t] repaints now.",
+	},
+	{
 		label: "keyforge keeps the sheet rule",
 		kind:  skInt,
 		get:   func(v *settingsView) string { return mins(v.cfg.Sheet.CacheMinutes) },
@@ -208,6 +219,13 @@ func (v *settingsView) Update(msg tea.Msg) (view, tea.Cmd) {
 			}
 			v.editing = true
 			v.buf.set("")
+		case "t":
+			// Repaint from disk without restarting. A theme is edited in another window and
+			// looked at in this one, and "restart to see it" is what makes a colour scheme take
+			// an evening. The styles are rebuilt in place, so the next draw is already the new
+			// palette — there is nothing to reload and nothing to lose.
+			r := ApplyTheme(v.cfg)
+			return v, status("painted with %s — %s", r.Name, r.Source)
 		case "w":
 			return v, v.save()
 		}
@@ -231,11 +249,15 @@ func (v *settingsView) save() tea.Cmd {
 		c.Lock = v.cfg.Lock
 		c.Agent = v.cfg.Agent
 		c.Sheet.CacheMinutes = v.cfg.Sheet.CacheMinutes
+		c.Theme = v.cfg.Theme
 	})
 	if err != nil {
 		return failure("%v", err)
 	}
 	v.cfg = updated
+	// The theme is the one setting here that takes effect where it was changed rather than next
+	// time, because it can: nothing but the styles depends on it.
+	ApplyTheme(v.cfg)
 	changed, aerr := gpgkeys.EnsureCacheTTL(
 		time.Duration(v.cfg.Agent.DefaultCacheTTL)*time.Second,
 		time.Duration(v.cfg.Agent.MaxCacheTTL)*time.Second,
@@ -268,7 +290,15 @@ func (v *settingsView) Render(w, h int) string {
 	default:
 		b.WriteString(stGood.Render("the agent is holding nothing"))
 	}
-	b.WriteString("\n\n")
+	b.WriteString("\n")
+
+	// Which palette is on screen and where it came from. A theme that quietly failed to resolve
+	// looks exactly like one that was never set, and this is the only line that can tell them
+	// apart — the interface itself would just be the built-in colours either way.
+	t := CurrentTheme()
+	b.WriteString("  " + stDim.Render("painted with: ") + stFg.Render(t.Name) +
+		stDim.Render("  ·  "+t.Source) + "\n")
+	b.WriteString("\n")
 
 	for i, s := range settings {
 		mark := "  "
@@ -288,6 +318,14 @@ func (v *settingsView) Render(w, h int) string {
 
 	if v.sel < len(settings) {
 		b.WriteString("\n" + indent(stDim.Render(wrapText(settings[v.sel].note, max(w-6, 30))), 2) + "\n")
+		// What the loaded theme could not supply, said only on the row it concerns: a partial
+		// palette is completed from the built-in, and that is worth knowing while you are looking
+		// at the theme and noise anywhere else.
+		if settings[v.sel].label == "theme" {
+			for _, n := range t.Notes {
+				b.WriteString(indent(stWarn.Render(wrapText(n, max(w-6, 30))), 2) + "\n")
+			}
+		}
 	}
 	if v.dirty {
 		b.WriteString("\n  " + stWarn.Render("changed — [w] writes it"))
@@ -299,7 +337,7 @@ func (v *settingsView) Footer() string {
 	if v.editing {
 		return joinHints(hint("enter", "accept"), hint("esc", "cancel"))
 	}
-	f := []string{hint("j/k", "move"), hint("enter", "change")}
+	f := []string{hint("j/k", "move"), hint("enter", "change"), hint("t", "repaint")}
 	if v.dirty {
 		f = append(f, hint("w", "write"))
 	}

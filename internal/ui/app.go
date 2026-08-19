@@ -94,6 +94,10 @@ const enterReloadEvery = 2 * time.Second
 
 // New builds the application with every tab this machine can support.
 func New(c config.Config) Model {
+	// Before anything is built, because a style is a value: a tab constructed under the built-in
+	// palette would keep it. Here rather than in main so every entry point that draws gets the
+	// same treatment.
+	ApplyTheme(c)
 	rules := newRuleCache(c)
 	return Model{
 		lock:  newLockState(c),

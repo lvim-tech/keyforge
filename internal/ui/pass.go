@@ -31,10 +31,25 @@ type passView struct {
 	po passgen.PhraseOptions
 
 	entries []passstore.Entry
-	shown   []passstore.Entry // entries after the filter
-	sel     int
-	loaded  bool
-	err     string
+	shown   []passstore.Entry // entries after the filter — what the tree is built from
+
+	// The tree, and the rows it currently draws.
+	//
+	// A store is a directory of directories and it was being shown as one flat alphabetical list
+	// with the folders printed above their contents as headers you could not stand on. That reads
+	// well for twenty entries and not at all for two hundred: there is no way to put a branch away,
+	// and no way to say that one folder matters more than the one whose name happens to start with
+	// an earlier letter. Both are what a tree is for.
+	root *treeNode
+	rows []*treeNode // one per drawn line, folders included
+
+	// open is which folders are unfolded, by store path. It outlives the process in keyforge's
+	// config directory — see config.TreeState for why it is kept there and the ORDER is not.
+	open map[string]bool
+
+	sel    int
+	loaded bool
+	err    string
 
 	// The state of the store's master password: the passphrase on the GPG key everything here is
 	// encrypted to. It is loaded with the list because it is the first thing worth knowing about a
@@ -78,6 +93,10 @@ func newPassView(c config.Config, rules *ruleCache) *passView {
 		po:     po,
 		move:   newInput("new path", "websites/example.com/user"),
 		filter: newInput("filter", "part of the path"),
+		// Which folders were open the last time is read here rather than defaulted, so opening
+		// keyforge lands you where you left it. A machine with no state file starts with the
+		// root level showing and everything under it folded.
+		open: openSet(config.LoadTreeState()),
 	}
 	// The shared reveal owns the timer and the toggle; wiping the locked buffer is this view's
 	// part of it, because it is the only one holding one.
@@ -123,29 +142,95 @@ func loadPass() tea.Msg {
 	return passLoaded{entries: entries, prot: prot, protKey: key, ttl: gpgkeys.AgentCacheTTL(), err: err}
 }
 
-func (v *passView) current() (passstore.Entry, bool) {
-	if v.sel < 0 || v.sel >= len(v.shown) {
-		return passstore.Entry{}, false
+// node is the row the cursor is on, folder or entry.
+func (v *passView) node() *treeNode {
+	if v.sel < 0 || v.sel >= len(v.rows) {
+		return nil
 	}
-	return v.shown[v.sel], true
+	return v.rows[v.sel]
 }
 
-// applyFilter recomputes the visible slice and keeps the cursor inside it.
+// current is the selected ENTRY, and deliberately not the selected node.
+//
+// A folder is now a row like any other, so every key that acts on a record — copy, reveal, edit,
+// move, delete — has to be able to answer "that is a folder". Returning the folder's own path as
+// if it were an entry name is how [d] would come to delete a branch nobody asked about.
+func (v *passView) current() (passstore.Entry, bool) {
+	n := v.node()
+	if n == nil || n.folder {
+		return passstore.Entry{}, false
+	}
+	return n.entry, true
+}
+
+// needEntry is the soft failure the folder rows made necessary: it says WHICH of the two
+// possible mistakes was made, because "no entry selected" on a row that plainly names something
+// reads as a broken program.
+func (v *passView) needEntry() (passstore.Entry, tea.Cmd) {
+	n := v.node()
+	switch {
+	case n == nil:
+		return passstore.Entry{}, failure("no entry selected")
+	case n.folder:
+		return passstore.Entry{}, failure("%s is a folder — select an entry inside it", n.leaf)
+	}
+	return n.entry, nil
+}
+
+// rebuild re-reads the shape of everything: the filter, the tree under it, and the drawn rows.
+//
+// It reads each folder's .order, so it belongs on the events that change what the tree IS —
+// a reload, a filter, a reorder — and not on folding, which only changes what is shown.
+func (v *passView) rebuild() {
+	v.applyFilter()
+	v.root = buildTree(v.shown)
+	v.reflow()
+}
+
+// reflow recomputes the visible rows and keeps the cursor on the node it was already on.
+//
+// By PATH rather than by index: folding a branch above the cursor moves every row below it, and a
+// cursor that stayed on row eleven would be pointing at a different password than the one the
+// user was looking at. When the node is gone — filtered away, deleted — the old index is kept
+// instead, which lands the cursor where the row used to be.
+func (v *passView) reflow() {
+	want, at := "", v.sel
+	if n := v.node(); n != nil {
+		want = n.path
+	}
+	v.rows = visibleRows(v.root, v.open, v.rows[:0])
+	v.sel = max(0, mini(at, len(v.rows)-1))
+	for i, n := range v.rows {
+		if n.path == want {
+			v.sel = i
+			return
+		}
+	}
+}
+
+// applyFilter recomputes the entries the tree is built from, and unfolds the way to them.
 func (v *passView) applyFilter() {
 	q := strings.ToLower(strings.TrimSpace(v.filter.String()))
 	if q == "" {
 		v.shown = v.entries
-	} else {
-		v.shown = nil
-		for _, e := range v.entries {
-			if strings.Contains(strings.ToLower(e.Name), q) {
-				v.shown = append(v.shown, e)
-			}
+		return
+	}
+	v.shown = nil
+	for _, e := range v.entries {
+		if !strings.Contains(strings.ToLower(e.Name), q) {
+			continue
+		}
+		v.shown = append(v.shown, e)
+		// A match inside a folded folder is a match nobody can see, and a filter that finds
+		// nothing visible is indistinguishable from one that found nothing. The folders on the
+		// way are opened in the STATE rather than around it, so [space] can still fold what the
+		// search opened instead of fighting it.
+		for _, f := range ancestors(e.Name) {
+			v.open[f] = true
 		}
 	}
-	if v.sel >= len(v.shown) {
-		v.sel = max(0, len(v.shown)-1)
-	}
+	// Not saved. What a search had to open is not where the user chose to be looking, and
+	// writing the state file on every keystroke of a filter would make it so.
 }
 
 func (v *passView) Update(msg tea.Msg) (view, tea.Cmd) {
@@ -171,7 +256,7 @@ func (v *passView) Update(msg tea.Msg) (view, tea.Cmd) {
 		}
 		v.err, v.entries = "", msg.entries
 		v.prot, v.protKey, v.ttl = msg.prot, msg.protKey, msg.ttl
-		v.applyFilter()
+		v.rebuild()
 		return v, nil
 
 	case tea.KeyMsg:
@@ -216,8 +301,10 @@ func (v *passView) Update(msg tea.Msg) (view, tea.Cmd) {
 
 func (v *passView) updateList(msg tea.KeyMsg) (view, tea.Cmd) {
 	switch msg.String() {
+	// The cursor walks the VISIBLE rows, so a folded branch is skipped rather than walked through
+	// invisibly — which is the whole point of being able to fold it.
 	case "j", "down":
-		if v.sel < len(v.shown)-1 {
+		if v.sel < len(v.rows)-1 {
 			v.sel++
 			v.rev.hide()
 		}
@@ -230,8 +317,19 @@ func (v *passView) updateList(msg tea.KeyMsg) (view, tea.Cmd) {
 		v.sel = 0
 		v.rev.hide()
 	case "G":
-		v.sel = max(0, len(v.shown)-1)
+		v.sel = max(0, len(v.rows)-1)
 		v.rev.hide()
+
+	// Folding is on [space], and reordering on the SHIFTED j and k — the mirror of the keys that
+	// move the cursor, which is the only pair still free. The obvious ones are not: h, l, q, tab,
+	// ctrl+c and ctrl+f are read by the shell before this view sees them, and so are both arrows,
+	// because left and right change tabs.
+	case " ":
+		return v, v.toggleFold()
+	case "K":
+		return v, v.reorder(-1)
+	case "J":
+		return v, v.reorder(1)
 
 	case "v":
 		return v.toggleReveal()
@@ -248,18 +346,23 @@ func (v *passView) updateList(msg tea.KeyMsg) (view, tea.Cmd) {
 		}
 		// A new entry starts in the folder you are standing in, which is nearly always the one you
 		// want — a second login for the same site is the common case, a brand new tree is not.
+		// Standing ON a folder now means exactly that: the entry starts inside it, which is the
+		// one thing [a] can usefully do with a row that is not a record.
 		folder := ""
-		if e, ok := v.current(); ok {
-			folder = e.Folder
+		if n := v.node(); n != nil {
+			folder = n.entry.Folder
+			if n.folder {
+				folder = n.path
+			}
 		}
 		v.form = newPassForm(folder)
 		v.form.rules, v.form.po = v.rules, v.po
 		v.mode = smForm
 
 	case "e":
-		e, ok := v.current()
-		if !ok {
-			return v, failure("no entry selected")
+		e, cmd := v.needEntry()
+		if cmd != nil {
+			return v, cmd
 		}
 		// Rewriting the entry replaces the whole file, metadata included, so the old fields are read
 		// back first and carried over. That read decrypts, and decryption can fail with the agent
@@ -275,9 +378,9 @@ func (v *passView) updateList(msg tea.KeyMsg) (view, tea.Cmd) {
 		v.mode = smForm
 
 	case "c":
-		e, ok := v.current()
-		if !ok {
-			return v, failure("no entry selected")
+		e, cmd := v.needEntry()
+		if cmd != nil {
+			return v, cmd
 		}
 		// pass decrypts and hands the value straight to the clipboard helper, then clears it again
 		// by itself, so this path never brings the password through keyforge at all. [v] does, and
@@ -286,9 +389,14 @@ func (v *passView) updateList(msg tea.KeyMsg) (view, tea.Cmd) {
 		return v, v.copyCmd(e)
 
 	case "enter", "f":
-		e, ok := v.current()
-		if !ok {
-			return v, failure("no entry selected")
+		// On a folder both keys mean the same thing they mean on an entry: open this. There is
+		// nothing to show about a folder that its own row does not already say.
+		if n := v.node(); n != nil && n.folder {
+			return v, v.toggleFold()
+		}
+		e, cmd := v.needEntry()
+		if cmd != nil {
+			return v, cmd
 		}
 		// Reading the fields decrypts, so it happens once here — on the keypress — and never in
 		// Render, which runs on every redraw and would ask gpg again for each one.
@@ -300,16 +408,16 @@ func (v *passView) updateList(msg tea.KeyMsg) (view, tea.Cmd) {
 		v.mode = smDetail
 
 	case "m":
-		e, ok := v.current()
-		if !ok {
-			return v, failure("no entry selected")
+		e, cmd := v.needEntry()
+		if cmd != nil {
+			return v, cmd
 		}
 		v.move.set(e.Name)
 		v.mode = smMove
 
 	case "d":
-		if _, ok := v.current(); !ok {
-			return v, failure("no entry selected")
+		if _, cmd := v.needEntry(); cmd != nil {
+			return v, cmd
 		}
 		v.mode = smConfirm
 
@@ -327,6 +435,65 @@ func (v *passView) updateList(msg tea.KeyMsg) (view, tea.Cmd) {
 		}
 	}
 	return v, nil
+}
+
+// toggleFold opens or folds the selected folder, and remembers which it was.
+//
+// The state is written NOW rather than on the way out. keyforge is a program people leave open
+// for days and eventually kill from another terminal, and a fold state that only survives a
+// clean quit is one that mostly does not survive.
+func (v *passView) toggleFold() tea.Cmd {
+	n := v.node()
+	if n == nil || !n.folder {
+		return nil
+	}
+	if v.open[n.path] {
+		delete(v.open, n.path)
+	} else {
+		v.open[n.path] = true
+	}
+	v.reflow()
+	if err := config.SaveTreeState(treeState(v.open, folderPaths(v.entries))); err != nil {
+		// Said out loud rather than swallowed: the tree still folds, but it will forget by the
+		// next run, and a program that quietly stops remembering is one you stop trusting to.
+		return failure("the tree state could not be saved: %v", err)
+	}
+	return nil
+}
+
+// reorder moves the selected node one place among its siblings and records the new order.
+//
+// The order goes into a .order file in that folder, INSIDE the store, because it is part of how
+// the store is organised: it belongs in the git repository the store usually is, and on every
+// machine that syncs it. Which folders are open is the opposite kind of fact and is kept out of
+// the store entirely — see config.TreeState.
+func (v *passView) reorder(d int) tea.Cmd {
+	n := v.node()
+	if n == nil {
+		return failure("nothing is selected")
+	}
+	// Refused under a filter, and this is not caution but correctness: the tree then holds only
+	// the matching children, and writing THAT as the folder's order would pin the matches to the
+	// top of a folder whose other entries were never on screen to be moved.
+	if strings.TrimSpace(v.filter.String()) != "" {
+		return failure("clear the filter first — the order is the whole folder's, not the matches'")
+	}
+	if !shift(n, d) {
+		where := "first"
+		if d > 0 {
+			where = "last"
+		}
+		return failure("%s is already %s in %s", n.leaf, where, parentName(n))
+	}
+	p := n.parent
+	if err := passstore.SetOrder(p.path, siblingKeys(p)); err != nil {
+		// Put back. A screen showing an order the store does not have is a screen that will
+		// rearrange itself on the next reload with no explanation.
+		shift(n, -d)
+		return failure("%v", err)
+	}
+	v.reflow()
+	return status("%s moved in %s", n.leaf, parentName(n))
 }
 
 func (v *passView) updateForm(msg tea.KeyMsg) (view, tea.Cmd) {
@@ -378,7 +545,7 @@ func (v *passView) updateFilter(msg tea.KeyMsg) (view, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		v.filter.set("")
-		v.applyFilter()
+		v.rebuild()
 		v.mode = smList
 		return v, nil
 	case "enter":
@@ -386,7 +553,7 @@ func (v *passView) updateFilter(msg tea.KeyMsg) (view, tea.Cmd) {
 		return v, nil
 	}
 	v.filter.update(msg)
-	v.applyFilter()
+	v.rebuild()
 	return v, nil
 }
 
@@ -460,9 +627,9 @@ func (v *passView) toggleReveal() (view, tea.Cmd) {
 		v.rev.hide()
 		return v, nil
 	}
-	e, ok := v.current()
-	if !ok {
-		return v, failure("no entry selected")
+	e, cmd := v.needEntry()
+	if cmd != nil {
+		return v, cmd
 	}
 	sec, err := passstore.Reveal(e.Name)
 	if err != nil {
@@ -588,60 +755,36 @@ func (v *passView) renderMaster() string {
 	return fmt.Sprintf("  %s %s   %s\n", stDim.Render("store →"), stFg.Render(rec), state)
 }
 
-// treeHeight is how many ROWS the entries in [s,e) occupy once their folder headers are drawn.
-func (v *passView) treeHeight(s, e int) int {
-	n, prev := 0, "\x00"
-	for i := s; i < e && i < len(v.shown); i++ {
-		if v.shown[i].Folder != prev {
-			prev = v.shown[i].Folder
-			n++
-		}
-		n++
-	}
-	return n
-}
-
-// treeWindow picks the widest range around the cursor whose rendered height fits in room.
+// treeWindow picks the rows to draw so that the cursor is one of them.
 //
-// It grows one entry at a time, downward and then upward, so the cursor ends up roughly in the
-// middle rather than pinned to an edge — and it asks treeHeight rather than assuming one row per
-// entry, which is the whole point: the rows the folder headers take are rows the entries cannot.
+// ONE ROW PER VISIBLE NODE, folders included — which is what let the old walk go. It measured the
+// rendered height of a range of entries because a folder used to be a header printed above the
+// entries it held: a line belonging to no entry, which the shell then cut off the bottom of a body
+// that had drawn more lines than it was given. A folder is a row you can stand on now, so height
+// and count are the same number again.
+//
+// The "… N above" and "… N below" markers are taken OUT of the budget rather than added beside it,
+// for the same reason: they are lines on the screen, and lines the window does not know about are
+// lines the shell cuts from the bottom.
 func (v *passView) treeWindow(room int) (int, int) {
-	if len(v.shown) == 0 || room < 1 {
+	n := len(v.rows)
+	if room < 1 || n == 0 {
 		return 0, 0
 	}
-	sel := v.sel
-	if sel >= len(v.shown) {
-		sel = len(v.shown) - 1
-	}
-	start, end := sel, sel+1
-	for {
-		grew := false
-		if end < len(v.shown) && v.treeHeight(start, end+1)+v.markers(start, end+1) <= room {
-			end++
-			grew = true
+	for r := room; r > 1; r-- {
+		start, end := window(n, v.sel, r)
+		used := end - start
+		if start > 0 {
+			used++
 		}
-		if start > 0 && v.treeHeight(start-1, end)+v.markers(start-1, end) <= room {
-			start--
-			grew = true
+		if end < n {
+			used++
 		}
-		if !grew {
+		if used <= room {
 			return start, end
 		}
 	}
-}
-
-// markers counts the "… N above" / "… N below" lines the window will need, which take rows of
-// their own and so belong in the budget rather than beside it.
-func (v *passView) markers(start, end int) int {
-	n := 0
-	if start > 0 {
-		n++
-	}
-	if end < len(v.shown) {
-		n++
-	}
-	return n
+	return window(n, v.sel, 1)
 }
 
 func (v *passView) renderList(w, h int) string {
@@ -664,43 +807,45 @@ func (v *passView) renderList(w, h int) string {
 		b.WriteString(stDim.Render("  the store is empty — press [a] for the first entry"))
 		return b.String()
 	}
-	if len(v.shown) == 0 {
+	if len(v.rows) == 0 {
 		b.WriteString(stDim.Render("  nothing matches the filter"))
 		return b.String()
 	}
 
-	// Folders are headers rather than rows: they are not things you can copy or delete, and making
-	// them selectable would mean every other keypress landing on something that cannot do anything.
-	lastFolder := "\x00"
-	// Windowed on RENDERED HEIGHT, not on the number of entries.
-	//
-	// This tree draws a header line for every folder it enters, so a window of eighteen entries
-	// is eighteen rows plus however many folders fall inside it — and the shell, which cuts the
-	// body to the height it budgeted, took the difference off the bottom. The last rows were
-	// drawn and then chopped, so the cursor could walk onto entries that were not on screen.
 	start, end := v.treeWindow(max(h-7, 1))
 	if start > 0 {
 		b.WriteString(stDim.Render(fmt.Sprintf("     … %d above", start)) + "\n")
 	}
-	for i, e := range v.shown[start:end] {
+	for i, n := range v.rows[start:end] {
 		i += start
-		if e.Folder != lastFolder {
-			lastFolder = e.Folder
-			label := e.Folder
-			if label == "" {
-				label = "(at the root)"
-			}
-			b.WriteString("  " + stAccent.Render(label+"/") + "\n")
-		}
 		mark := "  "
 		row := stRow
 		if i == v.sel {
 			mark = stKey.Render(pointer) + " "
 			row = stRowSel
 		}
-		age := stDim.Background(row.GetBackground())
-		line := cell("    "+e.Leaf, max(w-26, 20), row) + " " +
-			cell(e.Modified.Format("2006-01-02"), 12, age)
+		// The indent is the tree. Two columns a level, and a leaf carries the width of the marker
+		// its folder would have, so the names of one folder's children line up under each other
+		// instead of stepping sideways at every level.
+		pad := strings.Repeat("  ", n.depth)
+		right := stDim.Background(row.GetBackground())
+		if n.folder {
+			// ▸ folded, ▾ open — the state of the node, said on the node itself, because the only
+			// other place it could be said is the absence of the rows underneath, and an empty
+			// folder and a folded one would then look the same.
+			glyph := "▸"
+			if v.open[n.path] {
+				glyph = "▾"
+			}
+			name := cell(pad+glyph+" "+n.leaf+"/", max(w-26, 20), stAccent.Background(row.GetBackground()))
+			// How much it holds, which is the one thing worth knowing about a folder you have
+			// just put away — a date would be the folder's, and nobody has ever wanted that.
+			count := fmt.Sprintf("%d", n.records())
+			b.WriteString(mark + name + " " + cell(count, 12, right) + "\n")
+			continue
+		}
+		line := cell(pad+"  "+n.leaf, max(w-26, 20), row) + " " +
+			cell(n.entry.Modified.Format("2006-01-02"), 12, right)
 		b.WriteString(mark + line + "\n")
 	}
 
@@ -708,8 +853,8 @@ func (v *passView) renderList(w, h int) string {
 	// for 30s", and drew nothing: revealedLine was called only by the detail pane. A password
 	// held in locked memory for half a minute, announced, and never shown is the worst trade
 	// of the three — all of the exposure and none of the use.
-	if end < len(v.shown) {
-		b.WriteString(stDim.Render(fmt.Sprintf("     … %d below", len(v.shown)-end)) + "\n")
+	if end < len(v.rows) {
+		b.WriteString(stDim.Render(fmt.Sprintf("     … %d below", len(v.rows)-end)) + "\n")
 	}
 
 	if v.rev.on && v.revealed != nil {
@@ -761,9 +906,10 @@ func (v *passView) Footer() string {
 	// the capability was on screen, the way to reach it was not.
 	return joinHints(
 		hint("j/k", "move"), hint("g/G", "top/bottom"),
+		hint("space", "fold"), hint("K/J", "reorder"),
 		hint("a", "new"), hint("e", "change"), hint("c", "copy"), revealHint(v.rev.on),
 		hint("m", "move"), hint("d", "delete"), hint("/", "filter"), hint("r", "reload"),
-		hint("enter/f", "details"), hint("p", "master password"),
+		hint("enter/f", "open · details"), hint("p", "master password"),
 	)
 }
 

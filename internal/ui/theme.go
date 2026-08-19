@@ -12,38 +12,106 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/lvim-tech/keyforge/internal/config"
+	"github.com/lvim-tech/keyforge/internal/theme"
 )
 
+// The palette in force. Ten roles, filled from whatever theme resolved — see internal/theme for
+// where one comes from. They are variables rather than constants because the values move; what
+// each of them MEANS does not, and nothing below reassigns a role to a second meaning.
 var (
-	cBg     = lipgloss.Color("#2f383e")
-	cBgAlt  = lipgloss.Color("#374247")
-	cFg     = lipgloss.Color("#d3c6aa")
-	cDim    = lipgloss.Color("#859289")
-	cRed    = lipgloss.Color("#e67e80")
-	cYellow = lipgloss.Color("#dbbc7f")
-	cGreen  = lipgloss.Color("#a7c080")
-	cBlue   = lipgloss.Color("#7fbbb3")
-	cPurple = lipgloss.Color("#d699b6")
-	cOrange = lipgloss.Color("#e69875")
+	cBg     lipgloss.Color
+	cBgAlt  lipgloss.Color
+	cFg     lipgloss.Color
+	cDim    lipgloss.Color
+	cRed    lipgloss.Color
+	cYellow lipgloss.Color
+	cGreen  lipgloss.Color
+	cBlue   lipgloss.Color
+	cPurple lipgloss.Color
+	cOrange lipgloss.Color
 )
 
+// The styles, built FROM the palette rather than beside it.
+//
+// A lipgloss.Style holds the colour it was given, so these cannot be package-level initialisers
+// any more: a theme that arrives after the program has started has to be able to rebuild them.
+// They are rebuilt whole rather than patched, which is what keeps a repaint from leaving one
+// screen in the old colours.
 var (
+	stTitle    lipgloss.Style
+	stTab      lipgloss.Style
+	stTabOn    lipgloss.Style
+	stTabTight lipgloss.Style // the same tab with the padding taken away, for narrow terminals
+
+	stKey    lipgloss.Style
+	stDim    lipgloss.Style
+	stFg     lipgloss.Style
+	stGood   lipgloss.Style
+	stWarn   lipgloss.Style
+	stBad    lipgloss.Style
+	stAccent lipgloss.Style
+	stNote   lipgloss.Style
+
+	stRow    lipgloss.Style
+	stRowSel lipgloss.Style
+
+	stBox lipgloss.Style
+
+	stFooter lipgloss.Style
+	stErr    lipgloss.Style
+	stOK     lipgloss.Style
+)
+
+// loaded is the theme currently painted, kept so the Settings tab can say which one it is and
+// where it came from. A theme that half-applied in silence would be worse than none.
+var loaded = theme.Result{Palette: theme.Builtin(), Name: "everforest (built-in)", Source: "built-in"}
+
+// The built-in palette is in force before anything is read from disk, so a package that draws
+// during a test — or an early failure that prints before the config is loaded — is never painting
+// with the zero value, which lipgloss renders as the terminal's default and nothing else.
+func init() { UseTheme(loaded) }
+
+// ApplyTheme resolves the configured theme and paints with it, returning what it found.
+func ApplyTheme(c config.Config) theme.Result {
+	r := theme.Load(c.Theme)
+	UseTheme(r)
+	return r
+}
+
+// CurrentTheme is what is on screen right now.
+func CurrentTheme() theme.Result { return loaded }
+
+// UseTheme repaints the whole interface from a palette.
+//
+// Every style is rebuilt here and nowhere else. The alternative — each screen reading the palette
+// as it draws — is how one tab ends up a theme behind the others, and the colours in this program
+// are not decoration: a red that is not the same red everywhere is a red that has stopped meaning
+// "this is open right now".
+func UseTheme(r theme.Result) {
+	loaded = r
+	p := r.Palette
+	cBg, cBgAlt = lipgloss.Color(p.BG), lipgloss.Color(p.BGAlt)
+	cFg, cDim = lipgloss.Color(p.FG), lipgloss.Color(p.Dim)
+	cRed, cYellow, cGreen = lipgloss.Color(p.Red), lipgloss.Color(p.Yellow), lipgloss.Color(p.Green)
+	cBlue, cPurple, cOrange = lipgloss.Color(p.Blue), lipgloss.Color(p.Purple), lipgloss.Color(p.Orange)
+
 	stTitle = lipgloss.NewStyle().Bold(true).Foreground(cBg).Background(cBlue).Padding(0, 1)
-	stTab   = lipgloss.NewStyle().Foreground(cDim).Padding(0, 2)
+	stTab = lipgloss.NewStyle().Foreground(cDim).Padding(0, 2)
 	stTabOn = lipgloss.NewStyle().Bold(true).Foreground(cBg).Background(cGreen).Padding(0, 2)
-	// The same tab with the padding taken away, for terminals too narrow for the full strip.
 	stTabTight = lipgloss.NewStyle().Foreground(cDim)
 
-	stKey    = lipgloss.NewStyle().Bold(true).Foreground(cBlue)
-	stDim    = lipgloss.NewStyle().Foreground(cDim)
-	stFg     = lipgloss.NewStyle().Foreground(cFg)
-	stGood   = lipgloss.NewStyle().Foreground(cGreen)
-	stWarn   = lipgloss.NewStyle().Foreground(cYellow)
-	stBad    = lipgloss.NewStyle().Bold(true).Foreground(cRed)
+	stKey = lipgloss.NewStyle().Bold(true).Foreground(cBlue)
+	stDim = lipgloss.NewStyle().Foreground(cDim)
+	stFg = lipgloss.NewStyle().Foreground(cFg)
+	stGood = lipgloss.NewStyle().Foreground(cGreen)
+	stWarn = lipgloss.NewStyle().Foreground(cYellow)
+	stBad = lipgloss.NewStyle().Bold(true).Foreground(cRed)
 	stAccent = lipgloss.NewStyle().Foreground(cPurple)
-	stNote   = lipgloss.NewStyle().Foreground(cOrange)
+	stNote = lipgloss.NewStyle().Foreground(cOrange)
 
-	stRow    = lipgloss.NewStyle().Foreground(cFg)
+	stRow = lipgloss.NewStyle().Foreground(cFg)
 	stRowSel = lipgloss.NewStyle().Bold(true).Foreground(cFg).Background(cBgAlt)
 
 	stBox = lipgloss.NewStyle().
@@ -52,9 +120,9 @@ var (
 		Padding(0, 1)
 
 	stFooter = lipgloss.NewStyle().Foreground(cDim).Padding(0, 1)
-	stErr    = lipgloss.NewStyle().Bold(true).Foreground(cRed).Padding(0, 1)
-	stOK     = lipgloss.NewStyle().Bold(true).Foreground(cGreen).Padding(0, 1)
-)
+	stErr = lipgloss.NewStyle().Bold(true).Foreground(cRed).Padding(0, 1)
+	stOK = lipgloss.NewStyle().Bold(true).Foreground(cGreen).Padding(0, 1)
+}
 
 // listMark prefixes the items of a list written in prose, so a run of names reads as an
 // enumeration rather than as a sentence that happened to wrap.
