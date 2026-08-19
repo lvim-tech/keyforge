@@ -462,8 +462,11 @@ func (m Model) View() string {
 		return "…"
 	}
 	if m.lock.locked {
-		return stTitle.Render("keyforge") + "\n" +
-			m.lock.render(m.w, m.h-3) + "\n" + stFooter.Render(m.lock.footer())
+		// The curtain keeps the same frame discipline as the tabs: title on top, hints pinned
+		// to the bottom edge, the curtain itself in the space between.
+		curtain := padLines(clampLines(m.lock.render(m.w, m.h-2), m.h-2), m.h-2)
+		return clampLines(stTitle.Render("keyforge")+"\n"+curtain+"\n"+
+			stFooter.Render(m.lock.footer()), m.h)
 	}
 
 	head := stTitle.Render("keyforge") + " " + m.tabStrip(m.w-len("keyforge "))
@@ -533,7 +536,13 @@ func (m Model) View() string {
 	// CUT TO THE BUDGET, unconditionally. The views are given the height and are expected to
 	// fit inside it, but a view that draws one line too many pushes the whole composition down
 	// and the terminal scrolls.
-	body := clampLines(m.views[m.active].Render(m.w, bodyH), bodyH)
+	//
+	// And PADDED to the budget as well: a body shorter than its height used to pull the status
+	// line and the key hints up under it, so they sat just below the content — near the top of
+	// the window on a short list, somewhere else on a long one. The hints belong on the bottom
+	// edge of the terminal, in the same place every time, and only the space between the tab
+	// strip and them scrolls.
+	body := padLines(clampLines(m.views[m.active].Render(m.w, bodyH), bodyH), bodyH)
 
 	frame := head + "\n\n" + body + "\n" + st + "\n" + foot
 
