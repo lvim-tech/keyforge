@@ -97,12 +97,21 @@ func UseTheme(r theme.Result) {
 	cRed, cYellow, cGreen = lipgloss.Color(p.Red), lipgloss.Color(p.Yellow), lipgloss.Color(p.Green)
 	cBlue, cPurple, cOrange = lipgloss.Color(p.Blue), lipgloss.Color(p.Purple), lipgloss.Color(p.Orange)
 
-	stTitle = lipgloss.NewStyle().Bold(true).Foreground(cBg).Background(cBlue).Padding(0, 1)
+	// The ink on the accent surfaces — the chip and the active tab — is the theme's own
+	// title_fg when it names one, and bg otherwise: what was always painted there. NOT white,
+	// deliberately: on a light theme the readable ink over an accent is dark, and only the
+	// theme knows which it is.
+	cTitleFG := cBg
+	if p.TitleFG != "" {
+		cTitleFG = lipgloss.Color(p.TitleFG)
+	}
+
+	stTitle = lipgloss.NewStyle().Bold(true).Foreground(cTitleFG).Background(cBlue).Padding(0, 1)
 	stTab = lipgloss.NewStyle().Foreground(cDim).Padding(0, 2)
 	// Orange, not green: the rest of the lvim-tech set marks the active tab with the second
 	// accent, and a program that marks it with "verified good" is teaching its own green a
 	// second meaning.
-	stTabOn = lipgloss.NewStyle().Bold(true).Foreground(cBg).Background(cOrange).Padding(0, 2)
+	stTabOn = lipgloss.NewStyle().Bold(true).Foreground(cTitleFG).Background(cOrange).Padding(0, 2)
 	stTabTight = lipgloss.NewStyle().Foreground(cDim)
 
 	stKey = lipgloss.NewStyle().Bold(true).Foreground(cBlue)

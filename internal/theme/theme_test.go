@@ -3,6 +3,7 @@ package theme
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -175,5 +176,41 @@ func TestNormaliseRefusesWhatLipglossCannotPaint(t *testing.T) {
 	}
 	if got, ok := normalise("  #AABBCC "); !ok || got != "#aabbcc" {
 		t.Errorf("got %q %v", got, ok)
+	}
+}
+
+// TestTitleFGIsOptional: the ink for the accent surfaces is obeyed when a theme names it and
+// absent when it does not — absence is the fallback, not a defect, so it is neither taken from
+// the built-in nor reported as missing. Old palettes must parse exactly as they always did.
+func TestTitleFGIsOptional(t *testing.T) {
+	r, ok := parsePalette([]byte(`{"colors":{"bg":"#101010","fg":"#dddddd","title_fg":"#FFFFFF"}}`), "with")
+	if !ok {
+		t.Fatal("a palette naming title_fg was refused")
+	}
+	if r.Palette.TitleFG != "#ffffff" {
+		t.Errorf("title_fg was not read: %q", r.Palette.TitleFG)
+	}
+	for _, n := range r.Notes {
+		if strings.Contains(n, "title_fg") {
+			t.Errorf("title_fg appeared in a note: %q", n)
+		}
+	}
+
+	r, ok = parsePalette([]byte(`{"colors":{"bg":"#101010","fg":"#dddddd"}}`), "without")
+	if !ok {
+		t.Fatal("a palette without title_fg was refused")
+	}
+	if r.Palette.TitleFG != "" {
+		t.Errorf("an unnamed title_fg was invented: %q", r.Palette.TitleFG)
+	}
+	for _, n := range r.Notes {
+		if strings.Contains(n, "title_fg") {
+			t.Errorf("title_fg appeared in a note: %q", n)
+		}
+	}
+
+	r, _ = parsePalette([]byte(`{"colors":{"bg":"#101010","fg":"#dddddd","title_fg":"nonsense"}}`), "bad")
+	if r.Palette.TitleFG != "" {
+		t.Errorf("a malformed title_fg was kept: %q", r.Palette.TitleFG)
 	}
 }

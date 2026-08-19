@@ -37,17 +37,23 @@ import (
 // ordinary text and context. The five hues are the ones that carry meaning — red "open right now",
 // yellow "will bite you later", green "verified good", blue the interactive accent, purple and
 // orange the two secondary accents (folder names, notes).
+//
+// TitleFG is the one OPTIONAL role: the ink for text drawn ON an accent surface — the chip and
+// the active tab. Empty means the theme did not name it, and the interface falls back to bg,
+// which is what was always painted there — so every palette written before the role existed
+// keeps looking exactly as it did.
 type Palette struct {
-	BG     string `json:"bg"`
-	BGAlt  string `json:"bg_alt"`
-	FG     string `json:"fg"`
-	Dim    string `json:"dim"`
-	Red    string `json:"red"`
-	Yellow string `json:"yellow"`
-	Green  string `json:"green"`
-	Blue   string `json:"blue"`
-	Purple string `json:"purple"`
-	Orange string `json:"orange"`
+	BG      string `json:"bg"`
+	BGAlt   string `json:"bg_alt"`
+	FG      string `json:"fg"`
+	Dim     string `json:"dim"`
+	Red     string `json:"red"`
+	Yellow  string `json:"yellow"`
+	Green   string `json:"green"`
+	Blue    string `json:"blue"`
+	Purple  string `json:"purple"`
+	Orange  string `json:"orange"`
+	TitleFG string `json:"title_fg"`
 }
 
 // Builtin is Everforest, the palette keyforge carried hard-coded before any of this existed. It is
@@ -238,6 +244,13 @@ func fill(colors map[string]string) (Palette, []string) {
 		}
 		*s.into = s.from
 		missing = append(missing, s.role)
+	}
+	// title_fg is optional and stays OUTSIDE the required ten: it is not taken from the
+	// built-in and its absence is not reported, because absence is a complete answer — the
+	// interface paints the accent surfaces with bg then, as it always has. Only a value the
+	// theme actually supplies moves anything.
+	if hex, ok := normalise(colors["title_fg"]); ok {
+		p.TitleFG = hex
 	}
 	return p, missing
 }
