@@ -214,6 +214,44 @@ func window(total, sel, room int) (start, end int) {
 	return start, start + room
 }
 
+// markedWindow picks the rows to draw so the cursor stays visible, with the "… N above" and
+// "… N below" markers taken OUT of the budget rather than added beside it: they are lines on
+// the screen, and lines the window does not know about are lines the shell cuts from the
+// bottom — or, now that the body is padded to its budget, blank rows standing where list rows
+// could have been.
+func markedWindow(n, sel, room int) (int, int) {
+	if room < 1 || n == 0 {
+		return 0, 0
+	}
+	for r := room; r > 1; r-- {
+		start, end := window(n, sel, r)
+		used := end - start
+		if start > 0 {
+			used++
+		}
+		if end < n {
+			used++
+		}
+		if used <= room {
+			return start, end
+		}
+	}
+	return window(n, sel, 1)
+}
+
+// listBudget is the rows a list may fill once the chrome drawn around it is accounted for:
+// the height the shell gave, minus one for the frame's closing row, minus every line of every
+// fixed block above and below the list. The blocks are the RENDERED strings, measured rather
+// than guessed — a guessed worst-case reserve stands on screen as blank rows under the list,
+// with the list itself cut short above them saying "… N below" over empty space.
+func listBudget(h int, chrome ...string) int {
+	room := h - 1
+	for _, c := range chrome {
+		room -= strings.Count(c, "\n")
+	}
+	return max(room, 1)
+}
+
 // hanging renders `prefix + text` folded to width, with the continuation aligned under the TEXT
 // rather than under the prefix.
 //

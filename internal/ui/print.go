@@ -834,7 +834,8 @@ func (v *printView) renderList(w, h int) string {
 	if !inRAM {
 		where = stWarn.Render(dir + " (on disk!)")
 	}
-	b.WriteString("  " + stDim.Render("writes:  ") + where + stDim.Render("   via: ") + conv + "\n\n")
+	head := "  " + stDim.Render("writes:  ") + where + stDim.Render("   via: ") + conv + "\n\n"
+	b.WriteString(head)
 
 	if len(v.rows) == 0 {
 		// The same disappearance as the footer: [m] is mentioned only while it is there to
@@ -853,8 +854,15 @@ func (v *printView) renderList(w, h int) string {
 	// cut it off exactly there — every row read "websites/abv.bg/artdesi…", which is the same
 	// row twice as far as the reader is concerned.
 	labelW, paperW := v.columns(w)
-	b.WriteString(stDim.Render(fmt.Sprintf("     %-*s %-*s %s", labelW, "label", paperW, "on the sheet", "the password")) + "\n")
-	start, end := window(len(v.rows), v.sel, max(h-10, 1))
+	header := stDim.Render(fmt.Sprintf("     %-*s %-*s %s", labelW, "label", paperW, "on the sheet", "the password")) + "\n"
+	b.WriteString(header)
+
+	// Everything drawn under the list, built before the list is windowed: the budget is
+	// measured from what this frame really draws, not reserved for the worst case — once the
+	// body is padded to its height, an unused reserve is a band of blank rows sitting between
+	// "… N below" and the notes.
+	under := v.renderTail(w)
+	start, end := markedWindow(len(v.rows), v.sel, listBudget(h, head, header, under))
 	if start > 0 {
 		b.WriteString(stDim.Render(fmt.Sprintf("     … %d above", start)) + "\n")
 	}
@@ -884,6 +892,15 @@ func (v *printView) renderList(w, h int) string {
 	if end < len(v.rows) {
 		b.WriteString(stDim.Render(fmt.Sprintf("     … %d below", len(v.rows)-end)) + "\n")
 	}
+
+	b.WriteString(under)
+	return b.String()
+}
+
+// renderTail is everything the list carries under itself: the note of the last import, the
+// full label of the row under the cursor, its strength, and the last written file.
+func (v *printView) renderTail(w int) string {
+	var b strings.Builder
 
 	// The import note belongs to the LAST IMPORT, not to the row under the cursor, and it used
 	// to be drawn only while an imported row happened to be selected. So the one line saying

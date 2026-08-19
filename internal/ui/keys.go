@@ -384,13 +384,41 @@ func (v *keysView) renderList(w, h int) string {
 		return stDim.Render("  no private keys in " + sshkeys.Dir() + " — press [n] for a new one")
 	}
 	var b strings.Builder
-	head := fmt.Sprintf("  %-20s %-12s %-10s %-8s %s", "key", "type", "passphrase", "format", "opens")
-	b.WriteString(stDim.Render(head) + "\n")
+	head := stDim.Render(fmt.Sprintf("  %-20s %-12s %-10s %-8s %s", "key", "type", "passphrase", "format", "opens")) + "\n"
+	b.WriteString(head)
+
+	// What goes UNDER the list, built before the list is windowed so the budget is measured
+	// from what this frame really draws rather than reserved by guesswork — a reserve stands
+	// on screen as blank rows under the details once the body is padded to its height.
+	under := ""
+	if k, ok := v.current(); ok {
+		var d strings.Builder
+		d.WriteString("\n")
+		// The fingerprint the scan already read, not a fresh ssh-keygen. Render runs after every
+		// message — and with the idle lock on that is once a second while the tab merely sits
+		// there — so asking Fingerprints here forked two processes per frame for a string that
+		// was already in hand. buildDetail still asks, because it runs once per keypress and
+		// needs the MD5 form too.
+		for _, l := range strings.Split(wrapText(k.Fingerprint, max(w-4, 24)), "\n") {
+			d.WriteString(stDim.Render("  "+l) + "\n")
+		}
+		if k.Comment != "" {
+			d.WriteString(indent(stDim.Render(wrapText(k.Comment, max(w-4, 24))), 2) + "\n")
+		}
+		// The hosts this key opens, whole. The column holds one line and cuts it, and a key
+		// that opens four aliases is exactly the key whose column tells you the least.
+		if len(k.Hosts) > 0 {
+			for _, l := range hanging("opens: ", strings.Join(k.Hosts, ", "), max(w-4, 24)) {
+				d.WriteString(indent(stDim.Render(l), 2) + "\n")
+			}
+		}
+		under = d.String()
+	}
 
 	// The rows are windowed to what the terminal can actually show. The shell cuts the body to
 	// the height it budgeted — otherwise the footer is pushed off the bottom — so a list longer
 	// than the screen would lose its tail silently, cursor and all.
-	start, end := window(len(v.keys), v.sel, max(h-4, 1))
+	start, end := markedWindow(len(v.keys), v.sel, listBudget(h, head, under))
 	if start > 0 {
 		b.WriteString(stDim.Render(fmt.Sprintf("     … %d above", start)) + "\n")
 	}
@@ -444,27 +472,7 @@ func (v *keysView) renderList(w, h int) string {
 		b.WriteString(stDim.Render(fmt.Sprintf("     … %d below", len(v.keys)-end)) + "\n")
 	}
 
-	if k, ok := v.current(); ok {
-		b.WriteString("\n")
-		// The fingerprint the scan already read, not a fresh ssh-keygen. Render runs after every
-		// message — and with the idle lock on that is once a second while the tab merely sits
-		// there — so asking Fingerprints here forked two processes per frame for a string that
-		// was already in hand. buildDetail still asks, because it runs once per keypress and
-		// needs the MD5 form too.
-		for _, l := range strings.Split(wrapText(k.Fingerprint, max(w-4, 24)), "\n") {
-			b.WriteString(stDim.Render("  "+l) + "\n")
-		}
-		if k.Comment != "" {
-			b.WriteString(indent(stDim.Render(wrapText(k.Comment, max(w-4, 24))), 2) + "\n")
-		}
-		// The hosts this key opens, whole. The column holds one line and cuts it, and a key
-		// that opens four aliases is exactly the key whose column tells you the least.
-		if len(k.Hosts) > 0 {
-			for _, l := range hanging("opens: ", strings.Join(k.Hosts, ", "), max(w-4, 24)) {
-				b.WriteString(indent(stDim.Render(l), 2) + "\n")
-			}
-		}
-	}
+	b.WriteString(under)
 	return b.String()
 }
 

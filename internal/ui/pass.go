@@ -755,38 +755,6 @@ func (v *passView) renderMaster() string {
 	return fmt.Sprintf("  %s %s   %s\n", stDim.Render("store →"), stFg.Render(rec), state)
 }
 
-// treeWindow picks the rows to draw so that the cursor is one of them.
-//
-// ONE ROW PER VISIBLE NODE, folders included — which is what let the old walk go. It measured the
-// rendered height of a range of entries because a folder used to be a header printed above the
-// entries it held: a line belonging to no entry, which the shell then cut off the bottom of a body
-// that had drawn more lines than it was given. A folder is a row you can stand on now, so height
-// and count are the same number again.
-//
-// The "… N above" and "… N below" markers are taken OUT of the budget rather than added beside it,
-// for the same reason: they are lines on the screen, and lines the window does not know about are
-// lines the shell cuts from the bottom.
-func (v *passView) treeWindow(room int) (int, int) {
-	n := len(v.rows)
-	if room < 1 || n == 0 {
-		return 0, 0
-	}
-	for r := room; r > 1; r-- {
-		start, end := window(n, v.sel, r)
-		used := end - start
-		if start > 0 {
-			used++
-		}
-		if end < n {
-			used++
-		}
-		if used <= room {
-			return start, end
-		}
-	}
-	return window(n, v.sel, 1)
-}
-
 func (v *passView) renderList(w, h int) string {
 	if !v.loaded {
 		return stDim.Render("  reading the store…")
@@ -796,12 +764,12 @@ func (v *passView) renderList(w, h int) string {
 	}
 
 	var b strings.Builder
-	b.WriteString(v.renderMaster())
-
+	head := v.renderMaster()
 	if v.mode == smFilter || strings.TrimSpace(v.filter.String()) != "" {
-		b.WriteString("  " + v.filter.render(v.mode == smFilter) + "\n")
+		head += "  " + v.filter.render(v.mode == smFilter) + "\n"
 	}
-	b.WriteString("\n")
+	head += "\n"
+	b.WriteString(head)
 
 	if len(v.entries) == 0 {
 		b.WriteString(stDim.Render("  the store is empty — press [a] for the first entry"))
@@ -812,7 +780,26 @@ func (v *passView) renderList(w, h int) string {
 		return b.String()
 	}
 
-	start, end := v.treeWindow(max(h-7, 1))
+	// Everything drawn UNDER the list, built before the list is windowed: the budget is
+	// measured from what this frame really draws, not reserved for the worst case. The
+	// reserve was three lines nothing used on an ordinary draw — and once the body is padded
+	// to its height, three unused lines are three blank rows sitting under "… N below".
+	under := ""
+	if v.rev.on && v.revealed != nil {
+		// [v] works from the list too, and until now it decrypted the entry, announced "on
+		// screen for 30s", and drew nothing: revealedLine was called only by the detail pane.
+		// A password held in locked memory for half a minute, announced, and never shown is
+		// the worst trade of the three — all of the exposure and none of the use.
+		under += "\n" + v.revealedLine(max(w-20, 24)) + "\n"
+	}
+	under += "\n" + stDim.Render(fmt.Sprintf("  %d %s in %s", len(v.entries), plural(len(v.entries), "entry", "entries"), passstore.Dir()))
+
+	// ONE ROW PER VISIBLE NODE, folders included — which is what let the old walk go. It
+	// measured the rendered height of a range of entries because a folder used to be a header
+	// printed above the entries it held: a line belonging to no entry, which the shell then
+	// cut off the bottom of a body that had drawn more lines than it was given. A folder is a
+	// row you can stand on now, so height and count are the same number again.
+	start, end := markedWindow(len(v.rows), v.sel, listBudget(h, head, under))
 	if start > 0 {
 		b.WriteString(stDim.Render(fmt.Sprintf("     … %d above", start)) + "\n")
 	}
@@ -849,19 +836,11 @@ func (v *passView) renderList(w, h int) string {
 		b.WriteString(mark + line + "\n")
 	}
 
-	// [v] works from the list too, and until now it decrypted the entry, announced "on screen
-	// for 30s", and drew nothing: revealedLine was called only by the detail pane. A password
-	// held in locked memory for half a minute, announced, and never shown is the worst trade
-	// of the three — all of the exposure and none of the use.
 	if end < len(v.rows) {
 		b.WriteString(stDim.Render(fmt.Sprintf("     … %d below", len(v.rows)-end)) + "\n")
 	}
 
-	if v.rev.on && v.revealed != nil {
-		b.WriteString("\n" + v.revealedLine(max(w-20, 24)) + "\n")
-	}
-
-	b.WriteString("\n" + stDim.Render(fmt.Sprintf("  %d %s in %s", len(v.entries), plural(len(v.entries), "entry", "entries"), passstore.Dir())))
+	b.WriteString(under)
 	return b.String()
 }
 
