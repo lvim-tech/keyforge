@@ -99,7 +99,10 @@ func UseTheme(r theme.Result) {
 
 	stTitle = lipgloss.NewStyle().Bold(true).Foreground(cBg).Background(cBlue).Padding(0, 1)
 	stTab = lipgloss.NewStyle().Foreground(cDim).Padding(0, 2)
-	stTabOn = lipgloss.NewStyle().Bold(true).Foreground(cBg).Background(cGreen).Padding(0, 2)
+	// Orange, not green: the rest of the lvim-tech set marks the active tab with the second
+	// accent, and a program that marks it with "verified good" is teaching its own green a
+	// second meaning.
+	stTabOn = lipgloss.NewStyle().Bold(true).Foreground(cBg).Background(cOrange).Padding(0, 2)
 	stTabTight = lipgloss.NewStyle().Foreground(cDim)
 
 	stKey = lipgloss.NewStyle().Bold(true).Foreground(cBlue)
