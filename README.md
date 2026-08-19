@@ -254,10 +254,60 @@ Generator while the result changes in front of you — so it is not there.
 | `lock key` | claimed by the shell before any tab sees it |
 | `agent forgets after idle` | `default-cache-ttl`, restarts on every use |
 | `agent forgets regardless` | `max-cache-ttl`, the ceiling from when you typed it |
+| `theme` | a palette name or a path — see *Colours* below; `[t]` repaints without restarting |
 | `keyforge keeps the sheet rule` | `sheet.cache_minutes` — keyforge's own memory, not the agent's |
 
 Each row says what it costs, and the agent's real state is shown above them: a number without what
 it is currently doing is half the information.
+
+## Colours
+
+The palette is **ten roles, not ten colours**: red is "this is open right now", yellow "this will
+bite you later", green "verified good", grey is context, blue the interactive accent, purple and
+orange the two secondary ones. A theme moves the values; nothing can move the meanings.
+
+keyforge follows [lvim-colorscheme](https://github.com/lvim-tech/lvim-colorscheme). That plugin
+writes the active theme's name to `stdpath("data")/lvim-colorscheme/theme` precisely so a
+non-Neovim reader can find it without loading anything, and keyforge reads it. Change the
+colorscheme in the editor and keyforge is repainted the next time it starts, or immediately with
+`[t]` in Settings.
+
+Where a palette is looked for, in order — each step skipped when it does not resolve:
+
+1. `$KEYFORGE_THEME` — a theme name, or a path to a palette file.
+2. `$LVIM_COLORSCHEME` — a theme name.
+3. whatever lvim-colorscheme says is active (`…/lvim-colorscheme/theme`, then its `settings.json`).
+4. `theme` in `~/.config/keyforge/config.json` — a name or a path.
+5. the built-in Everforest.
+
+A name is resolved to a per-app theme file in `~/.config/keyforge/themes/`, one file per theme,
+under both spellings the plugin uses — the `:colorscheme` one (`lvim-everforest-soft.yaml`) and the
+generated-file one (`LvimEverforest_soft.yaml`). lvim-colorscheme generates these files for keyforge
+(`extras/keyforge/*.yaml`), the same per-app shape it generates for the other tools in this set.
+
+The palette document is YAML, and its keys are the ten roles:
+
+```yaml
+name: LvimEverforest_soft
+colors:
+    bg: "#292f33"
+    bg_alt: "#32393f"
+    fg: "#9baf95"
+    dim: "#5a6158"
+    red: "#cb4f4f"
+    yellow: "#af9e6b"
+    green: "#75783a"
+    blue: "#42728b"
+    purple: "#635d71"
+    orange: "#cc7942"
+```
+
+A flat mapping of role → hex is accepted as well, and a path ending `.json` is read too (the same
+parser handles both). **Nothing here can fail the program**: a missing,
+unreadable or partial file costs only the colours it could not supply — every role it does not
+name comes from the built-in, and Settings says which ones did. The foreground is checked against
+the background and lifted, hue intact, if it falls below 3:1 — several editor palettes carry a
+deliberately muted `fg` that is unreadable as plain text on a terminal.
 
 ## Process hardening
 
